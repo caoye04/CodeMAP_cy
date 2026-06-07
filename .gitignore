@@ -1,3 +1,9 @@
+# NEW
+
+codemap_env/
+log/
+*.log
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
