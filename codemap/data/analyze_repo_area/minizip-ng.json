@@ -6,67 +6,73 @@
   "llm_raw": {
     "areas": [
       {
-        "name": "build_system",
-        "path": "cmake",
-        "rationale": "包含所有用于配置、编译和构建项目的CMake脚本，是项目构建流程的独立模块。",
-        "brief": "项目的构建配置和脚本。"
+        "name": "library_core",
+        "path": ".",
+        "rationale": "包含Minizip-ng库的所有核心功能实现，包括ZIP文件操作、流管理、加密算法和操作系统抽象层。",
+        "brief": "Minizip-ng库的核心实现，提供ZIP文件读写、压缩和加密功能。"
       },
       {
-        "name": "compatibility_layer",
+        "name": "cli_applications",
+        "path": ".",
+        "rationale": "包含基于Minizip-ng库构建的命令行工具，如minigzip和minizip，用于演示和基本文件操作。",
+        "brief": "基于Minizip-ng库的命令行工具和示例应用。"
+      },
+      {
+        "name": "legacy_api_compat",
         "path": "compat",
-        "rationale": "提供了与旧版Minizip API兼容的接口和实现，方便现有项目迁移或保持向后兼容性。",
-        "brief": "兼容旧版Minizip API的接口和实现。"
+        "rationale": "提供与原始Minizip库API兼容的接口和实现，方便现有项目迁移或使用旧版API。",
+        "brief": "兼容旧版Minizip库API的适配层。"
+      },
+      {
+        "name": "build_system",
+        "path": "cmake",
+        "rationale": "包含用于配置和构建项目的CMake脚本，管理依赖和编译选项。",
+        "brief": "项目的构建系统配置和辅助脚本。"
       },
       {
         "name": "documentation",
         "path": "doc",
-        "rationale": "包含所有用户指南、API参考和技术说明文档，是项目的知识库。",
-        "brief": "项目的各类文档和说明。"
+        "rationale": "包含所有用户和开发者文档，如API说明、错误码、压缩方法等，帮助理解和使用库。",
+        "brief": "Minizip-ng库的官方文档和技术说明。"
       },
       {
         "name": "testing",
         "path": "test",
-        "rationale": "包含所有单元测试、集成测试和模糊测试代码及相关数据，确保库的功能正确性和稳定性。",
-        "brief": "项目的功能和性能测试。"
-      },
-      {
-        "name": "core_library",
-        "path": ".",
-        "rationale": "包含minizip-ng库的核心实现，涵盖ZIP文件操作、多种压缩流处理、加密功能、操作系统抽象层以及基于库的命令行工具示例。",
-        "brief": "minizip-ng库的核心功能、压缩算法、加密模块和示例应用。"
+        "rationale": "包含单元测试、集成测试和模糊测试等，用于验证库功能的正确性、稳定性和安全性。",
+        "brief": "项目的测试套件和测试数据，确保代码质量。"
       }
     ]
   },
   "areas": [
     {
-      "name": "build_system",
-      "path": "cmake",
-      "rationale": "包含所有用于配置、编译和构建项目的CMake脚本，是项目构建流程的独立模块。",
-      "brief": "项目的构建配置和脚本。"
+      "name": "library_core",
+      "path": ".",
+      "rationale": "包含Minizip-ng库的所有核心功能实现，包括ZIP文件操作、流管理、加密算法和操作系统抽象层。",
+      "brief": "Minizip-ng库的核心实现，提供ZIP文件读写、压缩和加密功能。"
     },
     {
-      "name": "compatibility_layer",
+      "name": "legacy_api_compat",
       "path": "compat",
-      "rationale": "提供了与旧版Minizip API兼容的接口和实现，方便现有项目迁移或保持向后兼容性。",
-      "brief": "兼容旧版Minizip API的接口和实现。"
+      "rationale": "提供与原始Minizip库API兼容的接口和实现，方便现有项目迁移或使用旧版API。",
+      "brief": "兼容旧版Minizip库API的适配层。"
+    },
+    {
+      "name": "build_system",
+      "path": "cmake",
+      "rationale": "包含用于配置和构建项目的CMake脚本，管理依赖和编译选项。",
+      "brief": "项目的构建系统配置和辅助脚本。"
     },
     {
       "name": "documentation",
       "path": "doc",
-      "rationale": "包含所有用户指南、API参考和技术说明文档，是项目的知识库。",
-      "brief": "项目的各类文档和说明。"
+      "rationale": "包含所有用户和开发者文档，如API说明、错误码、压缩方法等，帮助理解和使用库。",
+      "brief": "Minizip-ng库的官方文档和技术说明。"
     },
     {
       "name": "testing",
       "path": "test",
-      "rationale": "包含所有单元测试、集成测试和模糊测试代码及相关数据，确保库的功能正确性和稳定性。",
-      "brief": "项目的功能和性能测试。"
-    },
-    {
-      "name": "core_library",
-      "path": ".",
-      "rationale": "包含minizip-ng库的核心实现，涵盖ZIP文件操作、多种压缩流处理、加密功能、操作系统抽象层以及基于库的命令行工具示例。",
-      "brief": "minizip-ng库的核心功能、压缩算法、加密模块和示例应用。"
+      "rationale": "包含单元测试、集成测试和模糊测试等，用于验证库功能的正确性、稳定性和安全性。",
+      "brief": "项目的测试套件和测试数据，确保代码质量。"
     }
   ]
 }

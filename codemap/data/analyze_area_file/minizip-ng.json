@@ -1,0 +1,511 @@
+{
+  "repo_id": 1,
+  "repo_name": "minizip-ng",
+  "repo_path": "C:\\Users\\caoye04\\Desktop\\repo_4_codemap\\minizip-ng",
+  "summary": {
+    "total_areas": 5,
+    "total_files": 92
+  },
+  "areas": [
+    {
+      "area_id": 1,
+      "area_name": "library_core",
+      "area_path": ".",
+      "file_count": 50,
+      "files": [
+        {
+          "file_id": 1,
+          "name": "CMakeLists.txt",
+          "path": "CMakeLists.txt"
+        },
+        {
+          "file_id": 2,
+          "name": "INDEX.md",
+          "path": "INDEX.md"
+        },
+        {
+          "file_id": 3,
+          "name": "LICENSE",
+          "path": "LICENSE"
+        },
+        {
+          "file_id": 4,
+          "name": "README.md",
+          "path": "README.md"
+        },
+        {
+          "file_id": 5,
+          "name": "minigzip.c",
+          "path": "minigzip.c"
+        },
+        {
+          "file_id": 6,
+          "name": "minizip.c",
+          "path": "minizip.c"
+        },
+        {
+          "file_id": 7,
+          "name": "minizip.pc.cmakein",
+          "path": "minizip.pc.cmakein"
+        },
+        {
+          "file_id": 8,
+          "name": "mz.h",
+          "path": "mz.h"
+        },
+        {
+          "file_id": 9,
+          "name": "mz_config.h.cmakein",
+          "path": "mz_config.h.cmakein"
+        },
+        {
+          "file_id": 10,
+          "name": "mz_crypt.c",
+          "path": "mz_crypt.c"
+        },
+        {
+          "file_id": 11,
+          "name": "mz_crypt.h",
+          "path": "mz_crypt.h"
+        },
+        {
+          "file_id": 12,
+          "name": "mz_crypt_apple.c",
+          "path": "mz_crypt_apple.c"
+        },
+        {
+          "file_id": 13,
+          "name": "mz_crypt_openssl.c",
+          "path": "mz_crypt_openssl.c"
+        },
+        {
+          "file_id": 14,
+          "name": "mz_crypt_winvista.c",
+          "path": "mz_crypt_winvista.c"
+        },
+        {
+          "file_id": 15,
+          "name": "mz_crypt_winxp.c",
+          "path": "mz_crypt_winxp.c"
+        },
+        {
+          "file_id": 16,
+          "name": "mz_os.c",
+          "path": "mz_os.c"
+        },
+        {
+          "file_id": 17,
+          "name": "mz_os.h",
+          "path": "mz_os.h"
+        },
+        {
+          "file_id": 18,
+          "name": "mz_os_posix.c",
+          "path": "mz_os_posix.c"
+        },
+        {
+          "file_id": 19,
+          "name": "mz_os_win32.c",
+          "path": "mz_os_win32.c"
+        },
+        {
+          "file_id": 20,
+          "name": "mz_strm.c",
+          "path": "mz_strm.c"
+        },
+        {
+          "file_id": 21,
+          "name": "mz_strm.h",
+          "path": "mz_strm.h"
+        },
+        {
+          "file_id": 22,
+          "name": "mz_strm_buf.c",
+          "path": "mz_strm_buf.c"
+        },
+        {
+          "file_id": 23,
+          "name": "mz_strm_buf.h",
+          "path": "mz_strm_buf.h"
+        },
+        {
+          "file_id": 24,
+          "name": "mz_strm_bzip.c",
+          "path": "mz_strm_bzip.c"
+        },
+        {
+          "file_id": 25,
+          "name": "mz_strm_bzip.h",
+          "path": "mz_strm_bzip.h"
+        },
+        {
+          "file_id": 26,
+          "name": "mz_strm_libcomp.c",
+          "path": "mz_strm_libcomp.c"
+        },
+        {
+          "file_id": 27,
+          "name": "mz_strm_libcomp.h",
+          "path": "mz_strm_libcomp.h"
+        },
+        {
+          "file_id": 28,
+          "name": "mz_strm_lzma.c",
+          "path": "mz_strm_lzma.c"
+        },
+        {
+          "file_id": 29,
+          "name": "mz_strm_lzma.h",
+          "path": "mz_strm_lzma.h"
+        },
+        {
+          "file_id": 30,
+          "name": "mz_strm_mem.c",
+          "path": "mz_strm_mem.c"
+        },
+        {
+          "file_id": 31,
+          "name": "mz_strm_mem.h",
+          "path": "mz_strm_mem.h"
+        },
+        {
+          "file_id": 32,
+          "name": "mz_strm_os.h",
+          "path": "mz_strm_os.h"
+        },
+        {
+          "file_id": 33,
+          "name": "mz_strm_os_posix.c",
+          "path": "mz_strm_os_posix.c"
+        },
+        {
+          "file_id": 34,
+          "name": "mz_strm_os_win32.c",
+          "path": "mz_strm_os_win32.c"
+        },
+        {
+          "file_id": 35,
+          "name": "mz_strm_pkcrypt.c",
+          "path": "mz_strm_pkcrypt.c"
+        },
+        {
+          "file_id": 36,
+          "name": "mz_strm_pkcrypt.h",
+          "path": "mz_strm_pkcrypt.h"
+        },
+        {
+          "file_id": 37,
+          "name": "mz_strm_ppmd.c",
+          "path": "mz_strm_ppmd.c"
+        },
+        {
+          "file_id": 38,
+          "name": "mz_strm_ppmd.h",
+          "path": "mz_strm_ppmd.h"
+        },
+        {
+          "file_id": 39,
+          "name": "mz_strm_split.c",
+          "path": "mz_strm_split.c"
+        },
+        {
+          "file_id": 40,
+          "name": "mz_strm_split.h",
+          "path": "mz_strm_split.h"
+        },
+        {
+          "file_id": 41,
+          "name": "mz_strm_wzaes.c",
+          "path": "mz_strm_wzaes.c"
+        },
+        {
+          "file_id": 42,
+          "name": "mz_strm_wzaes.h",
+          "path": "mz_strm_wzaes.h"
+        },
+        {
+          "file_id": 43,
+          "name": "mz_strm_zlib.c",
+          "path": "mz_strm_zlib.c"
+        },
+        {
+          "file_id": 44,
+          "name": "mz_strm_zlib.h",
+          "path": "mz_strm_zlib.h"
+        },
+        {
+          "file_id": 45,
+          "name": "mz_strm_zstd.c",
+          "path": "mz_strm_zstd.c"
+        },
+        {
+          "file_id": 46,
+          "name": "mz_strm_zstd.h",
+          "path": "mz_strm_zstd.h"
+        },
+        {
+          "file_id": 47,
+          "name": "mz_zip.c",
+          "path": "mz_zip.c"
+        },
+        {
+          "file_id": 48,
+          "name": "mz_zip.h",
+          "path": "mz_zip.h"
+        },
+        {
+          "file_id": 49,
+          "name": "mz_zip_rw.c",
+          "path": "mz_zip_rw.c"
+        },
+        {
+          "file_id": 50,
+          "name": "mz_zip_rw.h",
+          "path": "mz_zip_rw.h"
+        }
+      ]
+    },
+    {
+      "area_id": 3,
+      "area_name": "build_system",
+      "area_path": "cmake",
+      "file_count": 2,
+      "files": [
+        {
+          "file_id": 51,
+          "name": "clone-repo.cmake",
+          "path": "cmake/clone-repo.cmake"
+        },
+        {
+          "file_id": 52,
+          "name": "detect-sanitizer.cmake",
+          "path": "cmake/detect-sanitizer.cmake"
+        }
+      ]
+    },
+    {
+      "area_id": 2,
+      "area_name": "legacy_api_compat",
+      "area_path": "compat",
+      "file_count": 7,
+      "files": [
+        {
+          "file_id": 53,
+          "name": "crypt.h",
+          "path": "compat/crypt.h"
+        },
+        {
+          "file_id": 54,
+          "name": "ioapi.c",
+          "path": "compat/ioapi.c"
+        },
+        {
+          "file_id": 55,
+          "name": "ioapi.h",
+          "path": "compat/ioapi.h"
+        },
+        {
+          "file_id": 56,
+          "name": "unzip.c",
+          "path": "compat/unzip.c"
+        },
+        {
+          "file_id": 57,
+          "name": "unzip.h",
+          "path": "compat/unzip.h"
+        },
+        {
+          "file_id": 58,
+          "name": "zip.c",
+          "path": "compat/zip.c"
+        },
+        {
+          "file_id": 59,
+          "name": "zip.h",
+          "path": "compat/zip.h"
+        }
+      ]
+    },
+    {
+      "area_id": 4,
+      "area_name": "documentation",
+      "area_path": "doc",
+      "file_count": 17,
+      "files": [
+        {
+          "file_id": 60,
+          "name": "README.md",
+          "path": "doc/README.md"
+        },
+        {
+          "file_id": 61,
+          "name": "mz_compress_level.md",
+          "path": "doc/mz_compress_level.md"
+        },
+        {
+          "file_id": 62,
+          "name": "mz_compress_method.md",
+          "path": "doc/mz_compress_method.md"
+        },
+        {
+          "file_id": 63,
+          "name": "mz_encoding.md",
+          "path": "doc/mz_encoding.md"
+        },
+        {
+          "file_id": 64,
+          "name": "mz_error.md",
+          "path": "doc/mz_error.md"
+        },
+        {
+          "file_id": 65,
+          "name": "mz_extrafield.md",
+          "path": "doc/mz_extrafield.md"
+        },
+        {
+          "file_id": 66,
+          "name": "mz_hash.md",
+          "path": "doc/mz_hash.md"
+        },
+        {
+          "file_id": 67,
+          "name": "mz_host_system.md",
+          "path": "doc/mz_host_system.md"
+        },
+        {
+          "file_id": 68,
+          "name": "mz_open_mode.md",
+          "path": "doc/mz_open_mode.md"
+        },
+        {
+          "file_id": 69,
+          "name": "mz_os.md",
+          "path": "doc/mz_os.md"
+        },
+        {
+          "file_id": 70,
+          "name": "mz_seek.md",
+          "path": "doc/mz_seek.md"
+        },
+        {
+          "file_id": 71,
+          "name": "mz_zip.md",
+          "path": "doc/mz_zip.md"
+        },
+        {
+          "file_id": 72,
+          "name": "mz_zip64.md",
+          "path": "doc/mz_zip64.md"
+        },
+        {
+          "file_id": 73,
+          "name": "mz_zip_file.md",
+          "path": "doc/mz_zip_file.md"
+        },
+        {
+          "file_id": 74,
+          "name": "mz_zip_rw.md",
+          "path": "doc/mz_zip_rw.md"
+        },
+        {
+          "file_id": 75,
+          "name": "appnote.iz.txt",
+          "path": "doc/zip/appnote.iz.txt"
+        },
+        {
+          "file_id": 76,
+          "name": "extra.fld.txt",
+          "path": "doc/zip/extra.fld.txt"
+        }
+      ]
+    },
+    {
+      "area_id": 5,
+      "area_name": "testing",
+      "area_path": "test",
+      "file_count": 16,
+      "files": [
+        {
+          "file_id": 77,
+          "name": "CMakeLists.txt",
+          "path": "test/CMakeLists.txt"
+        },
+        {
+          "file_id": 78,
+          "name": "empty.txt",
+          "path": "test/empty.txt"
+        },
+        {
+          "file_id": 79,
+          "name": "single.txt",
+          "path": "test/single.txt"
+        },
+        {
+          "file_id": 80,
+          "name": "test_compat.cc",
+          "path": "test/test_compat.cc"
+        },
+        {
+          "file_id": 81,
+          "name": "test_crypt.cc",
+          "path": "test/test_crypt.cc"
+        },
+        {
+          "file_id": 82,
+          "name": "test_encoding.cc",
+          "path": "test/test_encoding.cc"
+        },
+        {
+          "file_id": 83,
+          "name": "test_file.cc",
+          "path": "test/test_file.cc"
+        },
+        {
+          "file_id": 84,
+          "name": "test_main.cc",
+          "path": "test/test_main.cc"
+        },
+        {
+          "file_id": 85,
+          "name": "test_path.cc",
+          "path": "test/test_path.cc"
+        },
+        {
+          "file_id": 86,
+          "name": "test_stream.cc",
+          "path": "test/test_stream.cc"
+        },
+        {
+          "file_id": 87,
+          "name": "test_stream_compress.cc",
+          "path": "test/test_stream_compress.cc"
+        },
+        {
+          "file_id": 88,
+          "name": "test_stream_crypt.cc",
+          "path": "test/test_stream_crypt.cc"
+        },
+        {
+          "file_id": 89,
+          "name": "standalone.c",
+          "path": "test/fuzz/standalone.c"
+        },
+        {
+          "file_id": 90,
+          "name": "unzip_fuzzer.c",
+          "path": "test/fuzz/unzip_fuzzer.c"
+        },
+        {
+          "file_id": 91,
+          "name": "unzip_fuzzer.dict",
+          "path": "test/fuzz/unzip_fuzzer.dict"
+        },
+        {
+          "file_id": 92,
+          "name": "zip_fuzzer.c",
+          "path": "test/fuzz/zip_fuzzer.c"
+        }
+      ]
+    }
+  ]
+}

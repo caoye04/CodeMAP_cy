@@ -1977,3 +1977,2215 @@ def analyze_repo_area(
 
 ### step4：`analyze_area_file`实现
 
+`analyzer/area_analyzer.py`
+
+```
+"""
+analyzer/area_analyzer.py
+CodeMAP Area 层分析器
+
+实现：
+  - analyze_area_file : 扫描每个 area 路径下的文件结构，
+                        写入 file 表并更新 area.filelist，
+                        中间产物保存至 data/analyze_area_file/<repo_name>.json
+"""
+
+import json as _json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from db.dao import RepoDB, AreaDB, FileDB
+from config import DB_PATH, DATA_DIR
+
+
+# ------------------------------------------------------------------
+#  ① 过滤黑名单：需要跳过的文件扩展名
+#     原则：二进制、编译产物、媒体、打包归档、临时文件 —— 无代码分析价值
+# ------------------------------------------------------------------
+_SKIP_EXTENSIONS: frozenset[str] = frozenset({
+    # 编译 / 链接产物
+    '.o', '.obj', '.a', '.lib', '.so', '.dll', '.dylib',
+    '.exe', '.out', '.elf', '.ko', '.lo', '.la',
+    # Python 字节码
+    '.pyc', '.pyo', '.pyd',
+    # Java 字节码 / 打包
+    '.class', '.jar', '.war', '.ear',
+    # Node 构建产物
+    '.map',
+    # 图片
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico',
+    '.svg', '.webp', '.tiff', '.tif', '.raw', '.heic',
+    # 音视频
+    '.mp3', '.mp4', '.avi', '.mov', '.mkv', '.wav', '.flac', '.ogg', '.webm',
+    # 压缩包 / 归档
+    '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar', '.zst', '.lz4', '.lzma',
+    # 字体
+    '.ttf', '.otf', '.woff', '.woff2', '.eot',
+    # Office / PDF
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods',
+    # 数据库文件
+    '.db', '.sqlite', '.sqlite3',
+    # 其他二进制数据
+    '.bin', '.dat', '.iso', '.img',
+    # 调试符号
+    '.pdb',
+    # 覆盖率 / 性能分析产物
+    '.gcda', '.gcno', '.profraw', '.profdata',
+    # 临时 / 备份
+    '.bak', '.swp', '.swo', '.orig', '.tmp', '.temp',
+    # 锁文件（带扩展名的）
+    '.lock',
+    # 证书 / 密钥
+    '.pem', '.key', '.crt', '.cer', '.p12', '.pfx', '.der',
+    # 版本控制补丁（不属于源码）
+    '.patch', '.diff',
+})
+
+# ------------------------------------------------------------------
+#  ② 过滤黑名单：需要跳过的具体文件名（小写比较）
+# ------------------------------------------------------------------
+_SKIP_FILENAMES: frozenset[str] = frozenset({
+    # 系统残留
+    '.ds_store', 'thumbs.db', 'desktop.ini',
+    # 包管理锁文件
+    'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+    'poetry.lock', 'pipfile.lock', 'cargo.lock',
+    'composer.lock', 'gemfile.lock', 'mix.lock', 'packages.lock.json',
+    # VCS 配置（隐藏文件过滤已覆盖大部分，这里补充非隐藏的）
+    '.gitignore', '.gitattributes', '.gitmodules', '.gitkeep',
+    # 编辑器 / 格式化配置
+    '.editorconfig', '.clang-format', '.clang-tidy',
+    '.prettierrc', '.eslintrc', '.babelrc', '.stylelintrc',
+    # Docker / CI 元信息
+    '.npmignore', '.dockerignore', '.mailmap',
+    # compile_commands.json：clang 工具链产物，非源码
+    'compile_commands.json',
+})
+
+# ------------------------------------------------------------------
+#  ③ 遍历时跳过的目录（与 repo_analyzer.py 完全保持一致）
+# ------------------------------------------------------------------
+_IGNORE_DIRS: frozenset[str] = frozenset({
+    '.git', '.svn', '.hg',
+    '__pycache__', '.mypy_cache', '.pytest_cache', '.ruff_cache',
+    'node_modules',
+    '.venv', 'venv', 'env', '.env',
+    'build', 'dist', '.build', 'out', 'target', 'cmake-build-debug',
+    '.idea', '.vscode',
+    'vendor',
+})
+
+
+# ==================================================================
+#  内部辅助函数
+# ==================================================================
+
+def _is_useful_file(filename: str) -> bool:
+    """
+    判断文件名是否值得纳入 CodeMAP 分析。
+
+    过滤逻辑（按顺序）：
+      1. 以 '.' 开头的隐藏文件 → 跳过
+      2. 扩展名在 _SKIP_EXTENSIONS 黑名单 → 跳过
+      3. 文件名（小写）在 _SKIP_FILENAMES 黑名单 → 跳过
+      4. 其余文件 → 保留（宁可多扫，后续步骤可按语言再做筛选）
+
+    Parameters
+    ----------
+    filename : str
+        仅文件名，不含路径
+
+    Returns
+    -------
+    bool
+    """
+    if filename.startswith('.'):
+        return False
+
+    _, ext = os.path.splitext(filename)
+    if ext.lower() in _SKIP_EXTENSIONS:
+        return False
+
+    if filename.lower() in _SKIP_FILENAMES:
+        return False
+
+    return True
+
+
+def _scan_area_files(
+    area_abs_path: str,
+    repo_path: str,
+    other_area_abs_paths: set[str],
+) -> list[dict]:
+    """
+    递归扫描 area 目录，返回所有有效文件的 name + path 列表。
+
+    关键设计：**不递归进入属于其他 area 的子目录**，从根源上避免
+    同一文件被重复归属到多个 area（当 area 路径存在包含关系时尤其重要，
+    例如 area='.' 与 area='src/' 同时存在）。
+
+    Parameters
+    ----------
+    area_abs_path : str
+        当前 area 目录的绝对路径
+    repo_path : str
+        仓库根目录的绝对路径（用于计算 file 的相对路径）
+    other_area_abs_paths : set[str]
+        其他所有 area 的绝对路径集合；遇到匹配的子目录时跳过
+
+    Returns
+    -------
+    list[dict]
+        每项 {"name": str, "path": str}
+        path 相对于仓库根，统一使用 '/' 分隔符
+    """
+    collected: list[dict] = []
+
+    for root, dirs, filenames in os.walk(area_abs_path, topdown=True):
+        # ---------- 过滤子目录 ----------
+        dirs_keep: list[str] = []
+        for d in sorted(dirs):
+            # 忽略列表 & 隐藏目录
+            if d in _IGNORE_DIRS or d.startswith('.'):
+                continue
+            # 属于另一个独立 area 的目录 → 不递归，由该 area 自行扫描
+            child_abs = os.path.normpath(os.path.join(root, d))
+            if child_abs in other_area_abs_paths:
+                continue
+            dirs_keep.append(d)
+        dirs[:] = dirs_keep
+
+        # ---------- 收集文件 ----------
+        for filename in sorted(filenames):
+            if not _is_useful_file(filename):
+                continue
+
+            file_abs = os.path.join(root, filename)
+            try:
+                rel_path = os.path.relpath(file_abs, repo_path)
+                # 统一使用 '/' 分隔符（Windows 兼容）
+                rel_path = rel_path.replace(os.sep, '/')
+            except ValueError:
+                # Windows 跨盘符时 relpath 可能抛 ValueError
+                continue
+
+            collected.append({
+                'name': filename,
+                'path': rel_path,
+            })
+
+    return collected
+
+
+# ==================================================================
+#  analyze_area_file
+# ==================================================================
+
+def analyze_area_file(
+    repo_id: int,
+    db_path: str | None = None,
+    force: bool = False,
+) -> dict[int, list[dict]]:
+    """
+    扫描仓库每个 area 路径下的文件，写入 file 表并更新 area.filelist。
+
+    流程
+    ----
+    1. 读取仓库信息和所有 area 记录
+    2. 预计算各 area 的绝对路径，构造互斥集合（防重叠扫描）
+    3. 对每个 area 递归扫描文件，_is_useful_file() 过滤无效文件
+    4. 将文件写入 file 表（name / path），防御性地检测路径重复
+    5. 更新 area.filelist（file_id + name，brief 留空待后续步骤填充）
+    6. 汇总写出中间产物 JSON → data/analyze_area_file/<repo_name>.json
+
+    数据库写入字段
+    --------------
+    - file.name   : 文件名（basename）
+    - file.path   : 相对仓库根的路径，'/' 分隔
+    - area.filelist: [{"file_id": int, "name": str, "brief": ""}]
+
+    Parameters
+    ----------
+    repo_id : int
+        目标仓库 id（由 init_repo 返回）
+    db_path : str | None
+        SQLite 数据库路径；不传则使用 config.DB_PATH
+    force : bool
+        若已存在 file 记录：
+          True  = 先清除所有旧 file 记录再重建
+          False = 抛出 ValueError
+
+    Returns
+    -------
+    dict[int, list[dict]]
+        键为 area_id，值为该 area 下已入库的文件列表，每项：
+        {
+            "file_id": int,
+            "name":    str,
+            "path":    str,  # 相对仓库根，'/' 分隔
+        }
+
+    Raises
+    ------
+    ValueError
+        · repo_id 在数据库中不存在
+        · 该仓库尚无 area 记录（需先执行 analyze_repo_area）
+        · force=False 且已有 file 记录
+    """
+    _db = db_path or DB_PATH
+
+    # ── ① 取仓库信息 ────────────────────────────────────────────────
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(
+            f"[analyze_area_file] repo_id={repo_id} 在数据库中不存在。"
+        )
+
+    repo_path = repo['path']
+    repo_name = repo['name']
+    print(f"[analyze_area_file] 目标仓库：{repo_name}（{repo_path}）")
+
+    # ── ② 取 area 列表 ──────────────────────────────────────────────
+    areas = AreaDB.list_by_repo(repo_id, db_path=_db)
+    if not areas:
+        raise ValueError(
+            f"[analyze_area_file] repo_id={repo_id} 无 area 记录，"
+            "请先执行 analyze_repo_area。"
+        )
+    print(f"[analyze_area_file] 共 {len(areas)} 个 area，开始扫描文件…")
+
+    # ── ③ 处理已有 file 记录 ────────────────────────────────────────
+    existing_files = FileDB.list_by_repo(repo_id, db_path=_db)
+    if existing_files:
+        if force:
+            for f in existing_files:
+                FileDB.delete(f['id'], db_path=_db)
+            print(f"[analyze_area_file] 已清除 {len(existing_files)} 条旧 file 记录。")
+        else:
+            raise ValueError(
+                f"[analyze_area_file] repo_id={repo_id} 已有 {len(existing_files)} 个 file 记录。"
+                " 如需重新扫描，请传入 force=True。"
+            )
+
+    # ── ④ 预计算各 area 绝对路径 ────────────────────────────────────
+    # normpath 确保路径字符串可直接用集合匹配，Windows 下统一反斜杠
+    area_abs_map: dict[int, str] = {}
+    for area in areas:
+        rel = area['path']
+        abs_p = (
+            repo_path
+            if rel == '.'
+            else os.path.normpath(os.path.join(repo_path, rel))
+        )
+        area_abs_map[area['id']] = abs_p
+
+    # ── ⑤ 逐 area 扫描文件 ──────────────────────────────────────────
+    result: dict[int, list[dict]]   = {}
+    all_area_records: list[dict]    = []   # 用于中间产物 JSON
+
+    for area in areas:
+        area_id       = area['id']
+        area_name     = area['name']
+        area_path_rel = area['path']
+        area_abs      = area_abs_map[area_id]
+
+        # 路径不存在时发出警告并跳过（LLM 给出的路径可能已被删除/重命名）
+        if not os.path.exists(area_abs):
+            print(
+                f"[analyze_area_file] ⚠ area '{area_name}' 路径不存在，"
+                f"已跳过：{area_abs}"
+            )
+            result[area_id] = []
+            continue
+
+        # 当前 area 以外的所有 area 绝对路径（扫描时不递归进入）
+        other_abs: set[str] = {
+            p for aid, p in area_abs_map.items() if aid != area_id
+        }
+
+        print(
+            f"[analyze_area_file]   扫描 area [{area_id:3d}] "
+            f"'{area_name}'（{area_path_rel}）…"
+        )
+
+        raw_files = _scan_area_files(area_abs, repo_path, other_abs)
+        print(f"[analyze_area_file]     → 发现 {len(raw_files)} 个有效文件")
+
+        # ── ⑥ 写入 file 表 ──────────────────────────────────────────
+        area_filelist:      list[dict] = []   # 写回 area.filelist
+        area_file_records:  list[dict] = []   # 供调用方和中间产物使用
+
+        for file_info in raw_files:
+            file_name = file_info['name']
+            file_path = file_info['path']   # 相对仓库根
+
+            # 防御：若同一路径已存在（area 路径部分重叠时），不重复创建
+            existing_file = FileDB.get_by_path(repo_id, file_path, db_path=_db)
+            if existing_file is not None:
+                file_id = existing_file['id']
+                print(
+                    f"[analyze_area_file]     ⚠ 路径已存在（area 路径重叠？）："
+                    f"{file_path} → 复用 file_id={file_id}"
+                )
+            else:
+                file_id = FileDB.create(
+                    repo_id = repo_id,
+                    area_id = area_id,
+                    name    = file_name,
+                    path    = file_path,
+                    db_path = _db,
+                )
+
+            area_filelist.append({
+                'file_id': file_id,
+                'name':    file_name,
+                'brief':   '',      # 留给 analyze_area_filelist_description（step16）填充
+            })
+            area_file_records.append({
+                'file_id': file_id,
+                'name':    file_name,
+                'path':    file_path,
+            })
+
+        # ── ⑦ 更新 area.filelist ────────────────────────────────────
+        AreaDB.update(area_id, db_path=_db, filelist=area_filelist)
+
+        result[area_id] = area_file_records
+        all_area_records.append({
+            'area_id':    area_id,
+            'area_name':  area_name,
+            'area_path':  area_path_rel,
+            'file_count': len(area_file_records),
+            'files':      area_file_records,
+        })
+
+        print(
+            f"[analyze_area_file]     ✓ '{area_name}'："
+            f"{len(area_file_records)} 个文件已入库"
+        )
+
+    # ── ⑧ 保存中间产物 JSON ─────────────────────────────────────────
+    output_dir  = os.path.join(DATA_DIR, 'analyze_area_file')
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"{repo_name}.json")
+
+    total_files = sum(len(v) for v in result.values())
+    intermediate = {
+        'repo_id':   repo_id,
+        'repo_name': repo_name,
+        'repo_path': repo_path,
+        'summary': {
+            'total_areas': len(areas),
+            'total_files': total_files,
+        },
+        'areas': all_area_records,
+    }
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        _json.dump(intermediate, f, ensure_ascii=False, indent=2)
+    print(f"[analyze_area_file] ✓ 中间产物 → {output_path}")
+
+    print(
+        f"[analyze_area_file] ✓ 完成：{len(areas)} 个 area，"
+        f"共 {total_files} 个文件已入库。"
+    )
+    return result
+```
+
+`test/test_area_analyzer_analyze_area_file_in_minizip-ng.py`
+
+```
+"""
+test/test_area_analyzer_analyze_area_file_in_minizip-ng.py
+针对真实 minizip-ng 仓库的 analyze_area_file 集成测试
+
+前置依赖（fixture 链自动保证执行顺序）：
+  init_repo → analyze_repo_language → analyze_repo_area → analyze_area_file
+
+仓库路径（相对 test/ 目录）  : ../../../repo_4_codemap/minizip-ng/
+仓库路径（相对 codemap/ 目录）: ../../repo_4_codemap/minizip-ng/
+
+运行：
+    python -m pytest "test/test_area_analyzer_analyze_area_file_in_minizip-ng.py" -v
+
+日志输出：
+    test/log/minizip_ng_file_<YYYYMMDD_HHMMSS>.log
+
+注意：
+    文件名含连字符，pytest 通过路径收集，勿以 import 方式引用本模块。
+    analyze_area_file 不依赖 LLM，纯本地磁盘扫描，速度较快。
+    analyze_repo_area 依赖 LLM，需保证网络与 API 可用。
+"""
+
+import json
+import logging
+import os
+import sqlite3
+import sys
+from datetime import datetime
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from db.dao import init_db, RepoDB, AreaDB, FileDB
+from analyzer.repo_analyzer import init_repo, analyze_repo_language, analyze_repo_area
+from analyzer.area_analyzer import analyze_area_file
+from config import DATA_DIR
+
+
+# ==================================================================
+#  常量：minizip-ng 仓库绝对路径
+# ==================================================================
+
+_REPO_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '../../../repo_4_codemap/minizip-ng')
+)
+
+pytestmark = pytest.mark.skipif(
+    not os.path.isdir(_REPO_PATH),
+    reason=f'minizip-ng 仓库未找到，跳过：{_REPO_PATH}',
+)
+
+
+# ==================================================================
+#  日志
+# ==================================================================
+
+def _setup_logger() -> logging.Logger:
+    """
+    在 test/log/ 创建 minizip_ng_file_<时间戳>.log。
+    Logger 名 'minizip_ng_file_test'，幂等注册 Handler。
+    """
+    log_dir = os.path.join(os.path.dirname(__file__), 'log')
+    os.makedirs(log_dir, exist_ok=True)
+
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = os.path.join(log_dir, f'minizip_ng_file_{ts}.log')
+
+    logger = logging.getLogger('minizip_ng_file_test')
+    logger.setLevel(logging.DEBUG)
+
+    if not logger.handlers:
+        fh = logging.FileHandler(log_file, encoding='utf-8')
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            '%(asctime)s  %(levelname)-7s  %(message)s',
+            datefmt='%H:%M:%S',
+        ))
+        logger.addHandler(fh)
+
+    logger.info('=' * 68)
+    logger.info('minizip-ng  analyze_area_file 集成测试开始')
+    logger.info(f'仓库路径  : {_REPO_PATH}')
+    logger.info(f'日志文件  : {log_file}')
+    logger.info('=' * 68)
+    return logger
+
+
+_logger = _setup_logger()
+
+
+# ==================================================================
+#  核心日志工具 1：数据库层级结构 repo → area → file
+# ==================================================================
+
+def _log_db_structure(db_path: str, repo_id: int, label: str) -> None:
+    """
+    直接读取 SQLite，以树状结构将「repo → area → file」层级信息写入日志。
+
+    展示内容：
+      - repo  基本信息（name / path / 主语言 / area 数）
+      - area  id / name / path / 文件数 / filelist 是否已更新
+      - file  id / name / language / 相对路径（每个 area 缩进展示）
+    """
+    _logger.info('')
+    _logger.info(f'┌── 数据库结构快照 [{label}]')
+
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+
+        # ── repo ──────────────────────────────────────────────────
+        repo_row = conn.execute(
+            'SELECT * FROM repo WHERE id = ?', (repo_id,)
+        ).fetchone()
+
+        if repo_row is None:
+            _logger.warning('│  repo 记录未找到')
+            _logger.info('└' + '─' * 60)
+            conn.close()
+            return
+
+        repo_d    = dict(repo_row)
+        main_lang = '?'
+        lang_raw  = repo_d.get('language')
+        if isinstance(lang_raw, str):
+            try:
+                main_lang = json.loads(lang_raw).get('main', '?')
+            except Exception:
+                pass
+
+        area_count = conn.execute(
+            'SELECT COUNT(*) FROM area WHERE repo_id = ?', (repo_id,)
+        ).fetchone()[0]
+        file_count_total = conn.execute(
+            'SELECT COUNT(*) FROM file WHERE repo_id = ?', (repo_id,)
+        ).fetchone()[0]
+
+        _logger.info(
+            f'│  repo : id={repo_d["id"]}  name={repo_d["name"]!r}  '
+            f'主语言={main_lang}  area数={area_count}  file总数={file_count_total}'
+        )
+        _logger.info(f'│         path={repo_d["path"]}')
+
+        # ── area + file ───────────────────────────────────────────
+        area_rows = conn.execute(
+            'SELECT * FROM area WHERE repo_id = ? ORDER BY path',
+            (repo_id,)
+        ).fetchall()
+
+        _logger.info('│')
+        for ai, area_row in enumerate(area_rows):
+            area_d   = dict(area_row)
+            area_id  = area_d['id']
+            is_last_area = (ai == len(area_rows) - 1)
+            area_connector = '└─' if is_last_area else '├─'
+            area_prefix    = '   ' if is_last_area else '│  '
+
+            file_rows = conn.execute(
+                'SELECT * FROM file WHERE area_id = ? ORDER BY path',
+                (area_id,)
+            ).fetchall()
+            file_count = len(file_rows)
+
+            # area.filelist 状态
+            filelist_raw = area_d.get('filelist')
+            filelist_status = '未更新(NULL)'
+            if isinstance(filelist_raw, str):
+                try:
+                    fl = json.loads(filelist_raw)
+                    filelist_status = f'已更新（{len(fl)} 项）'
+                except Exception:
+                    filelist_status = '解析失败'
+
+            _logger.info(
+                f'│  {area_connector} area [{area_id:>3}] {area_d["name"]!r:<26s} '
+                f'path={area_d["path"]!r:<20s} '
+                f'文件数={file_count}  filelist={filelist_status}'
+            )
+
+            # file 列表
+            for fi, file_row in enumerate(file_rows):
+                fd              = dict(file_row)
+                is_last_file    = (fi == len(file_rows) - 1)
+                file_connector  = '└── ' if is_last_file else '├── '
+                lang_str        = fd.get('language') or '—'
+                # 截断超长路径
+                path_str = fd['path']
+                if len(path_str) > 55:
+                    path_str = '...' + path_str[-52:]
+
+                _logger.info(
+                    f'│  {area_prefix}  {file_connector}'
+                    f'[{fd["id"]:>4}] {fd["name"]:<36s}'
+                    f'lang={lang_str:<6s}  {path_str}'
+                )
+
+            if not file_rows:
+                _logger.info(f'│  {area_prefix}      （该 area 暂无 file 记录）')
+
+        conn.close()
+
+    except Exception as exc:
+        _logger.warning(f'│  读取数据库失败：{exc}')
+
+    _logger.info('└' + '─' * 60)
+
+
+# ==================================================================
+#  核心日志工具 2：analyze_area_file 返回值摘要
+# ==================================================================
+
+def _log_file_summary(result: dict, label: str) -> None:
+    """
+    将 analyze_area_file 的返回值（dict[area_id → list[file_dict]]）
+    按 area 分组打印，给出每个 area 的文件数及文件列表基本信息。
+    """
+    _logger.info('')
+    _logger.info(f'┌── analyze_area_file 返回值摘要 [{label}]')
+
+    total = 0
+    for area_id, files in sorted(result.items()):
+        _logger.info(f'│  area_id={area_id:>3}  文件数={len(files)}')
+        for f in files:
+            path_str = f['path']
+            if len(path_str) > 55:
+                path_str = '...' + path_str[-52:]
+            _logger.info(
+                f'│    [{f["file_id"]:>4}] {f["name"]:<36s}  {path_str}'
+            )
+        total += len(files)
+
+    _logger.info('│')
+    _logger.info(f'│  合计：{len(result)} 个 area，{total} 个文件')
+    _logger.info('└' + '─' * 60)
+
+
+# ==================================================================
+#  Fixtures
+# ==================================================================
+
+@pytest.fixture(scope='module')
+def db(tmp_path_factory):
+    """模块级临时数据库，整个测试文件共享，保证用例间状态连续。"""
+    db_file = str(tmp_path_factory.mktemp('minizip_ng_file') / 'codemap.db')
+    _logger.info(f'[db] 创建临时数据库 → {db_file}')
+    init_db(db_file)
+    _logger.info('[db] 表结构初始化完成')
+    return db_file
+
+
+@pytest.fixture(scope='module')
+def repo_id(db):
+    """模块级：调用 init_repo()，返回 repo_id 供后续 fixture 和用例复用。"""
+    _logger.info('')
+    _logger.info('── 前置步骤 [1/3]：init_repo ──────────────────────────')
+    rid = init_repo(_REPO_PATH, db_path=db)
+    _logger.info(f'init_repo 完成，repo_id = {rid}')
+    return rid
+
+
+@pytest.fixture(scope='module')
+def language_ready(repo_id, db):
+    """
+    模块级：调用 analyze_repo_language()，确保 repo.language 已填充。
+    analyze_repo_area 读取主语言信息，故须先行执行。
+    """
+    _logger.info('')
+    _logger.info('── 前置步骤 [2/3]：analyze_repo_language ──────────────')
+    result = analyze_repo_language(repo_id, db_path=db)
+    _logger.info(f'analyze_repo_language 完成，主语言：{result.get("main")}')
+    top5 = result.get('stats', [])[:5]
+    for entry in top5:
+        _logger.info(
+            f'  {entry["lang"]:<18s} {entry["pct"]:6.2f}%  '
+            f'{entry["bytes"]:>12,} bytes'
+        )
+    return result
+
+
+@pytest.fixture(scope='module')
+def area_ready(language_ready, repo_id, db):
+    """
+    模块级：调用 analyze_repo_area()，确保 area 表已建立。
+    analyze_area_file 依赖 area 记录，故须先行执行。
+    """
+    _logger.info('')
+    _logger.info('── 前置步骤 [3/3]：analyze_repo_area ──────────────────')
+    result = analyze_repo_area(repo_id, db_path=db)
+    _logger.info(f'analyze_repo_area 完成，共 {len(result)} 个 area')
+    for a in result:
+        _logger.info(
+            f'  area_id={a["area_id"]:>3}  '
+            f'name={a["name"]!r:<28s}  '
+            f'path={a["path"]!r}'
+        )
+    return result
+
+
+@pytest.fixture(scope='module')
+def file_result(area_ready, repo_id, db):
+    """
+    模块级：调用 analyze_area_file()，写入 file 表并更新 area.filelist，
+    返回 dict[area_id, list[file_dict]] 供全部测试用例复用。
+    """
+    _logger.info('')
+    _logger.info('── analyze_area_file ─────────────────────────────────────')
+    _logger.info(f'调用 analyze_area_file(repo_id={repo_id})')
+
+    result = analyze_area_file(repo_id, db_path=db)
+    total  = sum(len(v) for v in result.values())
+
+    _logger.info(
+        f'analyze_area_file 返回，共 {len(result)} 个 area，{total} 个文件'
+    )
+
+    # ── 两种视角的日志输出 ──────────────────────────────────────────
+    _log_file_summary(result, label='analyze_area_file 初次调用完成后')
+    _log_db_structure(db, repo_id, label='analyze_area_file 初次调用完成后')
+
+    return result
+
+
+@pytest.fixture(autouse=True)
+def _log_boundary(request):
+    """自动在每条用例前后打印分隔线。"""
+    _logger.info('')
+    _logger.info('─' * 68)
+    _logger.info(f'▶ {request.node.name}')
+    _logger.info('─' * 68)
+    yield
+    _logger.info(f'◀ {request.node.name}  完成')
+
+
+# ==================================================================
+#  测试
+# ==================================================================
+
+class TestAnalyzeAreaFile:
+
+    # ------------------------------------------------------------------
+    # 返回值结构
+    # ------------------------------------------------------------------
+
+    def test_return_type_and_nonempty(self, file_result):
+        """
+        analyze_area_file 应：
+          - 返回值类型为 dict
+          - 字典非空（至少有一个 area）
+          - 全局文件总数 > 0（minizip-ng 有源码文件）
+        """
+        assert isinstance(file_result, dict), \
+            f'返回值应为 dict，实际类型：{type(file_result).__name__}'
+        assert len(file_result) > 0, \
+            '返回 dict 不应为空（至少有一个 area）'
+
+        total = sum(len(v) for v in file_result.values())
+        assert total > 0, \
+            'minizip-ng 应包含可识别文件，文件总数不应为 0'
+
+        _logger.info(
+            f'断言通过：返回非空 dict，{len(file_result)} 个 area，'
+            f'{total} 个文件 ✓'
+        )
+
+    def test_each_file_has_required_fields(self, file_result):
+        """
+        每个 file 条目应包含 file_id / name / path，
+        且所有字段值非 None、非空字符串。
+        """
+        required = {'file_id', 'name', 'path'}
+        checked  = 0
+        for area_id, files in file_result.items():
+            for idx, finfo in enumerate(files):
+                missing = required - set(finfo.keys())
+                assert not missing, \
+                    f'area_id={area_id} file[{idx}] 缺少字段：{missing}'
+                for field in required:
+                    val = finfo[field]
+                    assert val is not None, \
+                        f'area_id={area_id} file[{idx}].{field} 不应为 None'
+                    assert str(val).strip() != '', \
+                        f'area_id={area_id} file[{idx}].{field} 不应为空字符串'
+                checked += 1
+
+        _logger.info(f'断言通过：共检查 {checked} 个 file 条目，字段均完整且非空 ✓')
+
+    def test_file_id_is_positive_int(self, file_result):
+        """每个 file_id 应为正整数（由 FileDB.create 写库后返回）。"""
+        for area_id, files in file_result.items():
+            for finfo in files:
+                fid = finfo.get('file_id')
+                assert isinstance(fid, int) and fid > 0, \
+                    f'area_id={area_id} file_id 应为正整数，实际：{fid!r}'
+
+        _logger.info('断言通过：所有 file_id 均为正整数 ✓')
+
+    # ------------------------------------------------------------------
+    # 去重 / 路径规范
+    # ------------------------------------------------------------------
+
+    def test_no_duplicate_file_ids_or_paths(self, file_result):
+        """
+        全局范围内 file_id 和 path 均不重复，
+        确保同一文件未被多个 area 重复收录。
+        """
+        all_ids   = [f['file_id'] for files in file_result.values() for f in files]
+        all_paths = [f['path']    for files in file_result.values() for f in files]
+
+        dup_ids   = [x for x in set(all_ids)   if all_ids.count(x)   > 1]
+        dup_paths = [x for x in set(all_paths) if all_paths.count(x) > 1]
+
+        assert not dup_ids, \
+            f'存在重复 file_id：{dup_ids}'
+        assert not dup_paths, \
+            f'存在重复 file path（共 {len(dup_paths)} 条）：{dup_paths[:5]}...'
+
+        _logger.info(
+            f'断言通过：{len(all_ids)} 个文件中，file_id 和 path 均无重复 ✓'
+        )
+
+    def test_path_uses_forward_slash(self, file_result):
+        """所有 file.path 应使用 '/' 分隔符（跨平台规范）。"""
+        violations = []
+        for area_id, files in file_result.items():
+            for finfo in files:
+                if '\\' in finfo['path']:
+                    violations.append((area_id, finfo['path']))
+
+        assert not violations, \
+            f'以下 file.path 含反斜杠（应使用 /）：{violations[:5]}'
+
+        _logger.info('断言通过：所有 file.path 使用正斜杠分隔符 ✓')
+
+    # ------------------------------------------------------------------
+    # 磁盘验证
+    # ------------------------------------------------------------------
+
+    def test_all_file_paths_exist_on_disk(self, file_result):
+        """
+        每个 file.path（相对仓库根）对应的实际磁盘文件应存在。
+        """
+        checked = 0
+        for area_id, files in file_result.items():
+            for finfo in files:
+                abs_p = os.path.join(_REPO_PATH, finfo['path'])
+                assert os.path.isfile(abs_p), \
+                    f'file 路径在磁盘上不存在或不是文件：{finfo["path"]!r}'
+                checked += 1
+
+        _logger.info(f'断言通过：{checked} 个 file 路径在磁盘上均存在 ✓')
+
+    def test_file_count_per_area_reasonable(self, file_result):
+        """
+        每个 area 下的文件数不超过 500（异常上限），
+        且全局至少有一个 area 包含文件（仓库非空）。
+        """
+        for area_id, files in file_result.items():
+            assert len(files) <= 500, \
+                (f'area_id={area_id} 文件数 {len(files)} '
+                 f'超出预期上限 500，可能存在扫描逻辑异常')
+            _logger.info(f'  area_id={area_id:>3}  文件数={len(files)}  ✓')
+
+        non_empty = sum(1 for v in file_result.values() if v)
+        assert non_empty > 0, '至少应有一个 area 包含文件'
+
+        _logger.info(
+            f'断言通过：{non_empty} 个 area 包含文件，'
+            f'无 area 超出上限 500 ✓'
+        )
+
+    # ------------------------------------------------------------------
+    # 数据库一致性
+    # ------------------------------------------------------------------
+
+    def test_db_file_records_match_return(self, file_result, repo_id, db):
+        """
+        DB file 表中属于 repo_id 的记录总数应与返回值文件总数一致，
+        且每个 file_id 可按 id 查到，name / path 与返回值完全吻合。
+        """
+        db_files     = FileDB.list_by_repo(repo_id, db_path=db)
+        return_total = sum(len(v) for v in file_result.values())
+
+        assert len(db_files) == return_total, \
+            (f'DB file 记录数（{len(db_files)}）'
+             f'与返回文件总数（{return_total}）不一致')
+
+        for area_id, files in file_result.items():
+            for finfo in files:
+                record = FileDB.get_by_id(finfo['file_id'], db_path=db)
+                assert record is not None, \
+                    f'file_id={finfo["file_id"]} 在 DB 中找不到记录'
+                assert record['name'] == finfo['name'], \
+                    (f'file_id={finfo["file_id"]} name 不一致：'
+                     f'DB={record["name"]!r} / 返回={finfo["name"]!r}')
+                assert record['path'] == finfo['path'], \
+                    (f'file_id={finfo["file_id"]} path 不一致：'
+                     f'DB={record["path"]!r} / 返回={finfo["path"]!r}')
+
+        _logger.info(
+            f'断言通过：DB file 表 {len(db_files)} 条记录与返回列表完全匹配 ✓'
+        )
+
+    def test_db_file_fk_correct(self, file_result, repo_id, db):
+        """
+        DB 中每条 file 记录的外键应正确：
+          file.repo_id == repo_id  且  file.area_id 与 file_result 的 key 一致。
+        """
+        for area_id, files in file_result.items():
+            for finfo in files:
+                record = FileDB.get_by_id(finfo['file_id'], db_path=db)
+                assert record['repo_id'] == repo_id, \
+                    (f'file_id={finfo["file_id"]} repo_id 错误：'
+                     f'DB={record["repo_id"]} / 期望={repo_id}')
+                assert record['area_id'] == area_id, \
+                    (f'file_id={finfo["file_id"]} area_id 错误：'
+                     f'DB={record["area_id"]} / 期望={area_id}')
+
+        _logger.info('断言通过：所有 file 记录的 repo_id / area_id 外键正确 ✓')
+
+    def test_area_filelist_updated(self, file_result, repo_id, db):
+        """
+        每个 area 的 filelist 字段应被正确更新：
+          - 反序列化后为 list
+          - 长度与 file_result 对应 area 的文件数一致
+          - 每项包含 file_id / name / brief 字段
+        """
+        for area_id, files in file_result.items():
+            area_record = AreaDB.get_by_id(area_id, db_path=db)
+            filelist    = area_record.get('filelist')
+
+            assert isinstance(filelist, list), \
+                (f'area_id={area_id} filelist 应反序列化为 list，'
+                 f'实际类型：{type(filelist).__name__}')
+            assert len(filelist) == len(files), \
+                (f'area_id={area_id} filelist 长度（{len(filelist)}）'
+                 f'与返回文件数（{len(files)}）不一致')
+
+            for idx, item in enumerate(filelist):
+                for key in ('file_id', 'name', 'brief'):
+                    assert key in item, \
+                        (f'area_id={area_id} filelist[{idx}] '
+                         f'缺少字段 {key!r}，实际：{item}')
+
+            _logger.info(
+                f'  area_id={area_id:>3}  filelist 长度={len(filelist):>4}  ✓'
+            )
+
+        _logger.info('断言通过：所有 area.filelist 已正确更新 ✓')
+
+    # ------------------------------------------------------------------
+    # 中间产物
+    # ------------------------------------------------------------------
+
+    def test_intermediate_json_saved(self, file_result):
+        """
+        中间产物 JSON 应写入 data/analyze_area_file/minizip-ng.json，
+        包含 areas / repo_id / repo_name / summary 字段，
+        且 summary.total_files 与返回值文件总数一致。
+        """
+        json_path = os.path.join(DATA_DIR, 'analyze_area_file', 'minizip-ng.json')
+        assert os.path.isfile(json_path), \
+            f'中间产物 JSON 文件不存在：{json_path}'
+
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        for key in ('areas', 'repo_id', 'repo_name', 'summary'):
+            assert key in data, \
+                f'JSON 缺少字段 {key!r}，实际 keys：{list(data.keys())}'
+
+        return_total = sum(len(v) for v in file_result.values())
+        json_total   = data['summary'].get('total_files', -1)
+        assert json_total == return_total, \
+            (f'JSON summary.total_files（{json_total}）'
+             f'与返回值文件总数（{return_total}）不一致')
+
+        # 详细打印 JSON 摘要到日志
+        _logger.info(f'中间产物 JSON 路径：{json_path}')
+        _logger.info(f'  summary.total_areas = {data["summary"].get("total_areas")}')
+        _logger.info(f'  summary.total_files = {json_total}')
+        for area_rec in data.get('areas', []):
+            _logger.info(
+                f'    area_id={area_rec.get("area_id"):>3}  '
+                f'name={area_rec.get("area_name")!r:<28s}  '
+                f'file_count={area_rec.get("file_count"):>4}  '
+                f'area_path={area_rec.get("area_path")!r}'
+            )
+
+        _logger.info(
+            f'断言通过：中间产物 JSON 结构完整，total_files={json_total} ✓'
+        )
+
+    # ------------------------------------------------------------------
+    # force 参数行为
+    # ------------------------------------------------------------------
+
+    def test_force_false_raises_on_duplicate(self, file_result, repo_id, db):
+        """
+        file 记录已存在时，force=False（默认值）再次调用应抛出 ValueError，
+        且错误信息提示已有 file 记录。
+        """
+        with pytest.raises(ValueError, match=r'已有.*file.*记录'):
+            analyze_area_file(repo_id, db_path=db, force=False)
+
+        _logger.info('断言通过：force=False 时重复调用抛出 ValueError ✓')
+
+    def test_force_true_allows_reanalysis(self, file_result, repo_id, db):
+        """
+        force=True 时应允许重新扫描（此用例最后执行，会修改 DB 状态）：
+          - 清除全部旧 file 记录并重建
+          - 返回新的非空 dict，文件总数合理
+          - 旧 file_id 在 DB 中应不再存在
+          - 每个 area.filelist 以新数据覆盖更新
+        """
+        old_ids = {
+            f['file_id']
+            for files in file_result.values()
+            for f in files
+        }
+        _logger.info(f'旧 file_id 集合大小：{len(old_ids)}')
+
+        new_result = analyze_area_file(repo_id, db_path=db, force=True)
+        new_total  = sum(len(v) for v in new_result.values())
+
+        # 返回值非空
+        assert isinstance(new_result, dict) and new_total > 0, \
+            'force=True 重新扫描后返回 dict 不应为空'
+
+        # 旧 file_id 应已被删除
+        for old_id in old_ids:
+            record = FileDB.get_by_id(old_id, db_path=db)
+            assert record is None, \
+                (f'旧 file_id={old_id} 在 force=True 后仍存在于 DB'
+                 f'（应已被删除）')
+
+        # 每个 area.filelist 以新数据覆盖
+        for area_id, files in new_result.items():
+            area_record = AreaDB.get_by_id(area_id, db_path=db)
+            filelist    = area_record.get('filelist')
+            assert isinstance(filelist, list) and len(filelist) == len(files), \
+                (f'force=True 后 area_id={area_id} filelist 长度'
+                 f'（{len(filelist) if isinstance(filelist, list) else "N/A"}）'
+                 f'应与新文件数（{len(files)}）一致')
+
+        _log_db_structure(db, repo_id, label='force=True 重新扫描后')
+        _logger.info(
+            f'断言通过：force=True 重新扫描成功，'
+            f'新文件共 {new_total} 个，旧 {len(old_ids)} 条记录已全部清除 ✓'
+        )
+```
+
+### Step5：`analyze_file_language`和`analyze_file_func`实现
+
+`llm/prompts.py`更新
+
+````
+# ==================================================================
+#  Step 5: analyze_file_func —— 文件函数提取（LLM 兜底）
+# ==================================================================
+
+ANALYZE_FILE_FUNC_SYSTEM = """\
+你是一位代码静态分析专家，擅长解析各种编程语言的函数结构。
+
+## 任务
+从给定的源代码文件中提取所有函数/方法定义，输出结构化 JSON。
+
+## 严格输出要求
+只输出合法 JSON，不含任何解释文字：
+```json
+{
+  "functions": [
+    {
+      "name": "函数名（不含类名前缀，如 init_stream 而非 Stream::init_stream）",
+      "signature": "完整函数签名字符串（与源码保持一致，含返回类型、函数名、参数列表）",
+      "start_line": 42,
+      "end_line": 105,
+      "params": [
+        {"name": "参数名", "type": "参数类型", "desc": ""}
+      ],
+      "returns": {"type": "返回值类型", "desc": ""}
+    }
+  ]
+}
+```
+
+## 规则
+- 仅提取有函数体（含 `{}` 或 Python 冒号+缩进块）的函数定义
+- 若是头文件（.h / .hpp）：同时提取仅有声明（无函数体）的函数，此时 start_line = end_line = 声明首行
+- Python：提取所有 `def` 和 `async def`，包括嵌套函数和类方法
+- C/C++：跳过 `#define` 宏，不提取纯类型别名声明
+- 行号严格匹配源码 "行号 | 代码" 格式中的数字（从 1 开始）
+- end_line 应为函数结束行（含闭合花括号 `}` 或 Python 最后一行缩进）
+- 参数列表按源码顺序列出，包括 self、this 等
+- 若函数无返回值，returns.type 填 "void"（C/C++）或 "None"（Python）
+- 若文件中无函数，返回 {"functions": []}
+"""
+
+ANALYZE_FILE_FUNC_USER = """\
+## 文件信息
+文件名：{file_name}
+编程语言：{language}
+文件路径：{file_path}
+
+## 源代码（含行号，格式：行号 | 代码）
+```{lang_lower}
+{numbered_content}
+```
+
+请提取所有函数并输出符合要求的 JSON。
+"""
+````
+
+`analyzer/file_analyzer.py`
+
+```
+"""
+analyzer/file_analyzer.py
+CodeMAP File 层分析器
+
+实现：
+  - analyze_file_language : 根据文件扩展名确定编程语言，批量写入 file.language
+  - analyze_file_func     : 提取文件中所有函数/方法，写入 func 表并更新 file.funclist
+
+函数提取策略（按优先级）：
+  Python       → Python ast 模块（精确，覆盖嵌套函数/方法）
+  C/C++/其他   → Universal Ctags（若可用）+ 源码签名解析补充 io
+  兜底          → LLM 全文提取（文件 ≤ _MAX_LINES_LLM 行时）
+"""
+
+import ast
+import json as _json
+import os
+import re
+import subprocess
+import sys
+from typing import Optional
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from db.dao import RepoDB, FileDB, FuncDB
+from config import DB_PATH, DATA_DIR
+
+
+# ══════════════════════════════════════════════════════════════════
+#  常量与映射表
+# ══════════════════════════════════════════════════════════════════
+
+_EXT_TO_LANG: dict[str, str] = {
+    # C / C++
+    '.c': 'C', '.h': 'C',
+    '.cpp': 'C++', '.cxx': 'C++', '.cc': 'C++',
+    '.hpp': 'C++', '.hxx': 'C++',
+    # Python
+    '.py': 'Python',
+    # Java
+    '.java': 'Java',
+    # JavaScript / TypeScript
+    '.js': 'JavaScript', '.jsx': 'JavaScript',
+    '.ts': 'TypeScript', '.tsx': 'TypeScript',
+    # Go
+    '.go': 'Go',
+    # Rust
+    '.rs': 'Rust',
+    # Shell
+    '.sh': 'Shell', '.bash': 'Shell', '.zsh': 'Shell',
+    # CMake
+    '.cmake': 'CMake',
+    # Ruby
+    '.rb': 'Ruby',
+    # Swift
+    '.swift': 'Swift',
+    # Kotlin
+    '.kt': 'Kotlin', '.kts': 'Kotlin',
+    # Scala
+    '.scala': 'Scala',
+    # Haskell
+    '.hs': 'Haskell',
+    # Assembly
+    '.asm': 'Assembly', '.s': 'Assembly',
+    # Lua
+    '.lua': 'Lua',
+    # Perl
+    '.pl': 'Perl', '.pm': 'Perl',
+    # Fortran
+    '.f': 'Fortran', '.f90': 'Fortran', '.f95': 'Fortran',
+    # MATLAB / Objective-C
+    '.m': 'MATLAB', '.mm': 'Objective-C',
+    # 配置 / 文档类
+    '.md': 'Markdown', '.rst': 'reStructuredText',
+    '.yaml': 'YAML', '.yml': 'YAML',
+    '.json': 'JSON', '.xml': 'XML',
+    '.html': 'HTML', '.htm': 'HTML',
+    '.css': 'CSS', '.sql': 'SQL',
+    '.toml': 'TOML', '.ini': 'INI', '.cfg': 'INI',
+}
+
+# 通常不含函数定义的语言 → 跳过函数提取
+_NO_FUNC_LANGS: frozenset[str] = frozenset({
+    'Markdown', 'reStructuredText', 'YAML', 'JSON', 'XML',
+    'HTML', 'CSS', 'SQL', 'TOML', 'INI',
+    'CMake', 'Makefile', 'Assembly', 'Unknown',
+})
+
+# ctags 语言名映射（Universal Ctags --languages 参数）
+_CTAGS_LANG_MAP: dict[str, str] = {
+    'C': 'C', 'C++': 'C++', 'Objective-C': 'ObjectiveC',
+    'Python': 'Python', 'Java': 'Java',
+    'JavaScript': 'JavaScript', 'TypeScript': 'TypeScript',
+    'Go': 'Go', 'Rust': 'Rust', 'Ruby': 'Ruby',
+    'Swift': 'Swift', 'Kotlin': 'Kotlin',
+    'Scala': 'Scala', 'Lua': 'Lua', 'Shell': 'Sh',
+}
+
+# ctags kind 字符集合 → 视为"函数"
+_FUNC_KINDS: frozenset[str] = frozenset({
+    'f', 'function',
+    'm', 'method',
+    'p', 'prototype',
+    's', 'subroutine',
+    'procedure',
+})
+
+_MAX_LINES_LLM   = 3000       # 超过此行数时截断发给 LLM
+_MAX_BYTES_READ  = 1_000_000  # 单文件最大读取字节（1 MB）
+
+# ctags 可用性缓存（None = 未检测）
+_ctags_ok: bool | None = None
+
+
+# ══════════════════════════════════════════════════════════════════
+#  语言检测
+# ══════════════════════════════════════════════════════════════════
+
+def _detect_language(file_name: str) -> str:
+    """根据文件名/扩展名推断编程语言，无法识别返回 'Unknown'。"""
+    _, ext = os.path.splitext(file_name)
+    lang = _EXT_TO_LANG.get(ext.lower())
+    if lang is None:
+        lower = file_name.lower()
+        if lower in ('makefile', 'gnumakefile'):
+            lang = 'Makefile'
+        elif file_name == 'CMakeLists.txt':
+            lang = 'CMake'
+    return lang or 'Unknown'
+
+
+# ══════════════════════════════════════════════════════════════════
+#  analyze_file_language
+# ══════════════════════════════════════════════════════════════════
+
+def analyze_file_language(
+    repo_id: int,
+    db_path: str | None = None,
+    file_id: int | None = None,
+) -> dict[int, str]:
+    """
+    根据文件扩展名确定编程语言并持久化到 file.language。
+
+    Parameters
+    ----------
+    repo_id : int
+        目标仓库 id（由 init_repo 返回）
+    db_path : str | None
+        SQLite 路径；不传则使用 config.DB_PATH
+    file_id : int | None
+        若指定，则只处理该文件；否则处理 repo 下所有文件
+
+    Returns
+    -------
+    dict[int, str]
+        {file_id: language} 映射，language 如 "C" / "Python" / "Unknown"
+
+    Raises
+    ------
+    ValueError
+        repo_id 或 file_id 在数据库中不存在
+    """
+    _db = db_path or DB_PATH
+
+    # ① 校验仓库
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(
+            f"[analyze_file_language] repo_id={repo_id} 不存在于数据库。"
+        )
+
+    # ② 确定目标文件列表
+    if file_id is not None:
+        file_rec = FileDB.get_by_id(file_id, db_path=_db)
+        if file_rec is None:
+            raise ValueError(
+                f"[analyze_file_language] file_id={file_id} 不存在于数据库。"
+            )
+        files = [file_rec]
+    else:
+        files = FileDB.list_by_repo(repo_id, db_path=_db)
+
+    if not files:
+        print(
+            f"[analyze_file_language] ⚠ repo_id={repo_id} 暂无文件记录，"
+            "请先执行 analyze_area_file。"
+        )
+        return {}
+
+    # ③ 批量检测并写库
+    result: dict[int, str]      = {}
+    lang_counter: dict[str, int] = {}
+
+    for f in files:
+        lang = _detect_language(f['name'])
+        FileDB.update(f['id'], db_path=_db, language=lang)
+        result[f['id']] = lang
+        lang_counter[lang] = lang_counter.get(lang, 0) + 1
+
+    # ④ 打印摘要
+    total = len(files)
+    print(f"[analyze_file_language] ✓ 处理 {total} 个文件，语言分布：")
+    for lang, cnt in sorted(lang_counter.items(), key=lambda x: -x[1]):
+        bar = '█' * min(cnt, 40)
+        print(f"    {lang:22s}: {cnt:4d}  {bar}")
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════
+#  文件读取工具
+# ══════════════════════════════════════════════════════════════════
+
+def _read_file_safe(file_path: str) -> str | None:
+    """
+    安全读取文本文件。
+    - 超过 _MAX_BYTES_READ 返回 None
+    - 含大量 NUL 字节（二进制）返回 None
+    - 依次尝试 utf-8 / latin-1 编码
+    """
+    try:
+        if os.path.getsize(file_path) > _MAX_BYTES_READ:
+            return None
+    except OSError:
+        return None
+
+    for enc in ('utf-8', 'latin-1'):
+        try:
+            with open(file_path, 'r', encoding=enc, errors='replace') as fh:
+                content = fh.read()
+            if content.count('\x00') > 20:   # 粗判二进制文件
+                return None
+            return content
+        except OSError:
+            return None
+    return None
+
+
+def _add_line_numbers(content: str) -> tuple[str, int]:
+    """
+    给内容每行加行号前缀，超过 _MAX_LINES_LLM 时截断并追加提示。
+
+    Returns
+    -------
+    (numbered_str, total_line_count)
+    """
+    lines = content.splitlines()
+    total = len(lines)
+    selected = lines[:_MAX_LINES_LLM]
+    numbered = '\n'.join(f"{i + 1:5d} | {line}" for i, line in enumerate(selected))
+    if total > _MAX_LINES_LLM:
+        numbered += (
+            f'\n... (文件共 {total} 行，已截断，仅展示前 {_MAX_LINES_LLM} 行)'
+        )
+    return numbered, total
+
+
+# ══════════════════════════════════════════════════════════════════
+#  策略 1：Python ast 提取
+# ══════════════════════════════════════════════════════════════════
+
+def _ann_str(node) -> str:
+    """安全地将 ast 注解节点转为字符串，失败时返回空串。"""
+    if node is None:
+        return ''
+    try:
+        return ast.unparse(node)
+    except Exception:
+        return ''
+
+
+def _build_py_signature(node: 'ast.FunctionDef | ast.AsyncFunctionDef') -> str:
+    """从 ast 函数节点构建完整签名字符串。"""
+    ao = node.args
+    parts: list[str] = []
+    defaults_offset = len(ao.args) - len(ao.defaults)
+
+    for i, arg in enumerate(ao.args):
+        ann = f': {_ann_str(arg.annotation)}' if arg.annotation else ''
+        di  = i - defaults_offset
+        try:
+            default = f' = {ast.unparse(ao.defaults[di])}' if di >= 0 else ''
+        except Exception:
+            default = ''
+        parts.append(f"{arg.arg}{ann}{default}")
+
+    if ao.vararg:
+        ann = f': {_ann_str(ao.vararg.annotation)}' if ao.vararg.annotation else ''
+        parts.append(f"*{ao.vararg.arg}{ann}")
+    elif ao.kwonlyargs:
+        parts.append('*')
+
+    for i, arg in enumerate(ao.kwonlyargs):
+        ann = f': {_ann_str(arg.annotation)}' if arg.annotation else ''
+        kd  = ao.kw_defaults[i]
+        try:
+            default = f' = {ast.unparse(kd)}' if kd is not None else ''
+        except Exception:
+            default = ''
+        parts.append(f"{arg.arg}{ann}{default}")
+
+    if ao.kwarg:
+        ann = f': {_ann_str(ao.kwarg.annotation)}' if ao.kwarg.annotation else ''
+        parts.append(f"**{ao.kwarg.arg}{ann}")
+
+    ret_ann = f' -> {_ann_str(node.returns)}' if node.returns else ''
+    prefix  = 'async def ' if isinstance(node, ast.AsyncFunctionDef) else 'def '
+    return f"{prefix}{node.name}({', '.join(parts)}){ret_ann}"
+
+
+def _build_py_params(node: 'ast.FunctionDef | ast.AsyncFunctionDef') -> list[dict]:
+    """从 ast 函数节点提取参数列表。"""
+    ao     = node.args
+    params: list[dict] = []
+
+    for arg in ao.args:
+        params.append({'name': arg.arg, 'type': _ann_str(arg.annotation), 'desc': ''})
+    if ao.vararg:
+        params.append({
+            'name': f'*{ao.vararg.arg}',
+            'type': _ann_str(ao.vararg.annotation),
+            'desc': '',
+        })
+    for arg in ao.kwonlyargs:
+        params.append({'name': arg.arg, 'type': _ann_str(arg.annotation), 'desc': ''})
+    if ao.kwarg:
+        params.append({
+            'name': f'**{ao.kwarg.arg}',
+            'type': _ann_str(ao.kwarg.annotation),
+            'desc': '',
+        })
+    return params
+
+
+def _extract_funcs_python(file_path: str) -> list[dict]:
+    """
+    使用 Python 内置 ast 模块提取函数/方法定义（含嵌套）。
+
+    Returns
+    -------
+    list[dict]  键: name, signature, start_line, end_line, params, returns
+    """
+    content = _read_file_safe(file_path)
+    if content is None:
+        return []
+
+    try:
+        tree = ast.parse(content, filename=os.path.basename(file_path))
+    except SyntaxError as e:
+        print(f"[file_analyzer] Python 语法错误，跳过 AST 提取：{e}")
+        return []
+
+    functions: list[dict] = []
+
+    class _Visitor(ast.NodeVisitor):
+        def _handle(self, node: 'ast.FunctionDef | ast.AsyncFunctionDef') -> None:
+            end_line = getattr(node, 'end_lineno', node.lineno)
+            functions.append({
+                'name':       node.name,
+                'signature':  _build_py_signature(node),
+                'start_line': node.lineno,
+                'end_line':   end_line,
+                'params':     _build_py_params(node),
+                'returns':    {'type': _ann_str(node.returns), 'desc': ''},
+            })
+            self.generic_visit(node)   # 继续遍历嵌套函数
+
+        def visit_FunctionDef(self, node):
+            self._handle(node)
+
+        def visit_AsyncFunctionDef(self, node):
+            self._handle(node)
+
+    _Visitor().visit(tree)
+    return functions
+
+
+# ══════════════════════════════════════════════════════════════════
+#  策略 2：Universal Ctags 提取
+# ══════════════════════════════════════════════════════════════════
+
+def _check_ctags() -> bool:
+    """检测 ctags 是否可用（结果进程生命周期内缓存）。"""
+    global _ctags_ok
+    if _ctags_ok is not None:
+        return _ctags_ok
+    try:
+        r = subprocess.run(
+            ['ctags', '--version'],
+            capture_output=True, text=True, timeout=5,
+        )
+        _ctags_ok = (r.returncode == 0)
+        if _ctags_ok:
+            flavor = 'Universal Ctags' if 'Universal Ctags' in r.stdout else 'Exuberant/Unknown Ctags'
+            print(f"[file_analyzer] ctags 可用（{flavor}）")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        _ctags_ok = False
+        print('[file_analyzer] ctags 不可用，将使用 LLM 兜底提取函数。')
+    return _ctags_ok
+
+
+def _parse_ctags_output(stdout: str) -> list[dict]:
+    """
+    解析 Universal Ctags u-ctags 格式输出，提取函数信息。
+
+    字段格式（TAB 分隔）：
+      name  filepath  pattern;"  kind  line:N  end:M  [signature:...]
+    """
+    functions: list[dict] = []
+    seen: set[tuple[str, int]] = set()   # (name, start_line) 去重
+
+    for raw_line in stdout.splitlines():
+        if raw_line.startswith('!'):
+            continue   # ctags 元信息行
+
+        parts = raw_line.split('\t')
+        if len(parts) < 4:
+            continue
+
+        name = parts[0].strip()
+        if not name:
+            continue
+
+        # 解析后续字段（parts[3:] 之后为 "key:value" 或单字符 kind）
+        fields: dict[str, str] = {}
+        kind_raw = ''
+
+        for part in parts[3:]:
+            part = part.strip()
+            if ':' in part:
+                k, _, v = part.partition(':')
+                k = k.strip()
+                if k == 'kind':
+                    kind_raw = v.strip()
+                else:
+                    fields[k] = v.strip()
+            elif len(part) == 1 and part.isalpha() and not kind_raw:
+                kind_raw = part
+
+        # 过滤非函数类型
+        if kind_raw.lower() not in _FUNC_KINDS:
+            continue
+
+        # 解析行号
+        try:
+            start_line = int(fields.get('line', 0))
+        except (ValueError, TypeError):
+            continue
+        if start_line == 0:
+            continue
+
+        try:
+            end_line = int(fields.get('end', start_line))
+        except (ValueError, TypeError):
+            end_line = start_line
+
+        # 去重
+        key = (name, start_line)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # ctags 的 signature 字段（不含返回类型，仅参数括号部分）
+        ctags_sig = fields.get('signature', fields.get('S', ''))
+
+        functions.append({
+            'name':       name,
+            'signature':  f"{name}{ctags_sig}".strip() if ctags_sig else name,
+            'start_line': start_line,
+            'end_line':   end_line,
+            'params':     [],                           # 由 _enrich_ctags_io 补全
+            'returns':    {'type': '', 'desc': ''},     # 由 _enrich_ctags_io 补全
+        })
+
+    return functions
+
+
+def _extract_funcs_ctags(file_path: str, language: str) -> list[dict] | None:
+    """
+    用 Universal Ctags 提取函数列表。
+
+    Returns
+    -------
+    list[dict]  成功时（可能为空列表）
+    None        ctags 不可用或调用失败
+    """
+    if not _check_ctags():
+        return None
+
+    ctags_lang = _CTAGS_LANG_MAP.get(language)
+    cmd: list[str] = [
+        'ctags',
+        '--fields=+neS',           # n=行号, e=结束行, S=签名（Universal Ctags）
+        '--extras=-F',             # 排除文件级标签
+        '--output-format=u-ctags', # Universal Ctags 格式（有明确 key:value 字段）
+        '-f', '-',                 # 输出到 stdout
+        file_path,
+    ]
+    if ctags_lang:
+        cmd.insert(1, f'--languages={ctags_lang}')
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[file_analyzer] ctags 超时：{os.path.basename(file_path)}")
+        return None
+    except Exception as e:
+        print(f"[file_analyzer] ctags 执行异常：{e}")
+        return None
+
+    if result.returncode != 0:
+        # --output-format=u-ctags 可能在 Exuberant Ctags 下失败
+        return None
+
+    return _parse_ctags_output(result.stdout)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  C/C++ 签名解析 —— 为 ctags 结果补充 io 信息
+# ══════════════════════════════════════════════════════════════════
+
+# C/C++ 修饰符关键词，不属于返回类型本身
+_C_QUALIFIERS: frozenset[str] = frozenset({
+    'static', 'extern', 'inline', 'virtual', 'explicit',
+    'constexpr', 'consteval', 'constinit', 'friend', 'override', 'final',
+    '__inline__', '__forceinline', '__cdecl', '__stdcall',
+    # 常见宏修饰（minizip-ng 风格）
+    'ZEXPORT', 'ZEXPORTVA', 'MZ_EXPORT', 'MZ_EXTERN',
+})
+
+
+def _split_c_params(params_str: str) -> list[str]:
+    """
+    按逗号分割 C/C++ 参数字符串，正确处理括号/模板/函数指针嵌套。
+    """
+    result: list[str] = []
+    depth   = 0
+    current: list[str] = []
+    for ch in params_str:
+        if ch in '(<[{':
+            depth += 1
+            current.append(ch)
+        elif ch in ')>]}':
+            depth -= 1
+            current.append(ch)
+        elif ch == ',' and depth == 0:
+            result.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        result.append(''.join(current).strip())
+    return [p for p in result if p]
+
+
+def _parse_c_io(signature: str) -> dict:
+    """
+    从 C/C++ 函数签名字符串解析参数列表和返回类型。
+
+    示例输入：
+      "int deflate_init(z_streamp strm, int level)"
+      "static MZ_EXPORT void * mz_alloc(void *opaque, size_t items, size_t size)"
+
+    Returns
+    -------
+    dict  {"params": [...], "returns": {"type": str, "desc": ""}}
+    """
+    io: dict = {'params': [], 'returns': {'type': '', 'desc': ''}}
+    sig = signature.strip()
+
+    # ── 找第一个 ( ──────────────────────────────────────────────────
+    paren_open = sig.find('(')
+    if paren_open == -1:
+        return io
+
+    before_paren = sig[:paren_open].strip()
+
+    # ── 找对应的 ) ──────────────────────────────────────────────────
+    depth = 1
+    idx = paren_open + 1
+    while idx < len(sig) and depth > 0:
+        if sig[idx] == '(':
+            depth += 1
+        elif sig[idx] == ')':
+            depth -= 1
+        idx += 1
+    params_str = sig[paren_open + 1: idx - 1].strip()
+
+    # ── 提取返回类型 ─────────────────────────────────────────────────
+    # before_paren 末尾的标识符是函数名，之前是返回类型（含修饰符）
+    name_match = re.search(r'(\b\w+)\s*$', before_paren)
+    if name_match:
+        ret_raw = before_paren[: name_match.start()].strip()
+    else:
+        ret_raw = ''
+
+    # 去掉存储类修饰符
+    ret_parts = [t for t in ret_raw.split() if t not in _C_QUALIFIERS]
+    io['returns']['type'] = ' '.join(ret_parts)
+
+    # ── 参数解析 ─────────────────────────────────────────────────────
+    if not params_str or params_str in ('void', ''):
+        return io
+
+    for param in _split_c_params(params_str):
+        param = param.strip()
+        if not param:
+            continue
+        if param == '...':
+            io['params'].append({'name': '...', 'type': '...', 'desc': ''})
+            continue
+
+        # 处理数组形式：int arr[]  →  name=arr, type=int []
+        arr_match = re.search(r'(\w+)\s*(\[\d*\])\s*$', param)
+        if arr_match:
+            pname = arr_match.group(1)
+            ptype = (param[: arr_match.start()].strip()
+                     + ' ' + arr_match.group(2)).strip()
+        else:
+            # 函数指针形式：void (*callback)(int) → 特殊处理
+            fp_match = re.search(r'\(\s*\*\s*(\w+)\s*\)', param)
+            if fp_match:
+                pname = fp_match.group(1)
+                ptype = param.replace(fp_match.group(0), '(*)', 1).strip()
+            else:
+                # 普通形式：最后一个标识符为参数名
+                tokens = re.findall(r'\w+', param)
+                if not tokens:
+                    continue
+                pname = tokens[-1]
+                # 去掉末尾参数名（保留指针 * & 等符号）
+                last_pos = param.rfind(pname)
+                ptype = param[:last_pos].rstrip('*& \t')
+                if not ptype:
+                    ptype = pname
+                    pname = ''
+
+        io['params'].append({
+            'name': pname,
+            'type': ptype.strip(),
+            'desc': '',
+        })
+
+    return io
+
+
+def _enrich_ctags_io(
+    funcs: list[dict],
+    file_path: str,
+    repo_rel_path: str,
+) -> list[dict]:
+    """
+    读取源文件，为 ctags 提取的函数补充完整签名及 io 信息。
+
+    做法：从 start_line 向后最多扫描 40 行，收集到第一个 '{' 或 ';' 止，
+    拼成完整函数声明行，再用 _parse_c_io 解析。
+
+    适用语言：C / C++ / Objective-C
+    """
+    content = _read_file_safe(file_path)
+    if content is None:
+        return funcs
+
+    lines       = content.splitlines()
+    total_lines = len(lines)
+
+    for func in funcs:
+        start = func['start_line']
+        if start < 1 or start > total_lines:
+            continue
+
+        # 向后收集行，直到遇到 '{' 或 ';'
+        collected: list[str] = []
+        for li in range(start - 1, min(start + 40, total_lines)):
+            row = lines[li].rstrip()
+            # 去掉行注释
+            row_no_comment = re.sub(r'//.*$', '', row)
+            collected.append(row_no_comment)
+            if '{' in row_no_comment or ';' in row_no_comment:
+                break
+
+        sig_raw = ' '.join(collected)
+        # 去掉 '{' 及其后内容
+        sig_raw = re.sub(r'\s*\{.*', '', sig_raw, flags=re.DOTALL).strip()
+        # 去掉行尾 ';'
+        sig_raw = sig_raw.rstrip(';').strip()
+        # 压缩多余空白
+        sig_raw = re.sub(r'\s+', ' ', sig_raw)
+
+        if sig_raw:
+            func['signature'] = sig_raw
+            io = _parse_c_io(sig_raw)
+            func['params']  = io['params']
+            func['returns'] = io['returns']
+
+    return funcs
+
+
+# ══════════════════════════════════════════════════════════════════
+#  策略 3：LLM 提取（通用兜底）
+# ══════════════════════════════════════════════════════════════════
+
+def _extract_funcs_llm(
+    file_path: str,
+    file_name: str,
+    language: str,
+    repo_rel_path: str,
+) -> list[dict]:
+    """
+    调用 LLM 提取函数列表，适用于任意语言。
+    文件超过 _MAX_LINES_LLM 行时截断（末尾部分函数可能丢失）。
+
+    Returns
+    -------
+    list[dict]  提取成功则返回函数列表；失败返回 []
+    """
+    from llm.client  import chat_completion_json
+    from llm.prompts import ANALYZE_FILE_FUNC_SYSTEM, ANALYZE_FILE_FUNC_USER
+    import config as _cfg
+
+    content = _read_file_safe(file_path)
+    if content is None:
+        print(f"[file_analyzer] 文件过大或无法读取，跳过 LLM 提取：{file_name}")
+        return []
+
+    numbered, total_lines = _add_line_numbers(content)
+    if total_lines > _MAX_LINES_LLM:
+        print(
+            f"[file_analyzer] {file_name} 共 {total_lines} 行，"
+            f"超限（{_MAX_LINES_LLM}），LLM 仅处理前 {_MAX_LINES_LLM} 行。"
+        )
+
+    # lang_lower 用于 Markdown 代码块高亮标注（去掉特殊字符）
+    lang_lower = language.lower().replace('+', 'p').replace('#', 'sharp')
+
+    user_msg = ANALYZE_FILE_FUNC_USER.format(
+        file_name        = file_name,
+        language         = language,
+        file_path        = repo_rel_path,
+        lang_lower       = lang_lower,
+        numbered_content = numbered,
+    )
+
+    messages = [
+        {'role': 'system', 'content': ANALYZE_FILE_FUNC_SYSTEM},
+        {'role': 'user',   'content': user_msg},
+    ]
+
+    print(
+        f"[file_analyzer] 调用 LLM 提取函数（{file_name}，"
+        f"模型 {_cfg.LLM_MODEL}）…"
+    )
+    try:
+        data = chat_completion_json(
+            messages=messages, temperature=0.1, max_tokens=8192
+        )
+    except Exception as e:
+        print(f"[file_analyzer] LLM 调用失败（{file_name}）：{e}")
+        return []
+
+    # 解析 LLM 输出
+    if isinstance(data, dict) and 'functions' in data:
+        raw_funcs = data['functions']
+    elif isinstance(data, list):
+        raw_funcs = data
+    else:
+        print(f"[file_analyzer] LLM 输出结构异常（{file_name}）：{type(data)}")
+        return []
+
+    functions: list[dict] = []
+    for item in raw_funcs:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get('name', '')).strip()
+        if not name:
+            continue
+
+        try:
+            start_line = int(item.get('start_line', 0))
+        except (ValueError, TypeError):
+            start_line = 0
+        try:
+            end_line = int(item.get('end_line', start_line))
+        except (ValueError, TypeError):
+            end_line = start_line
+
+        signature = str(item.get('signature', name)).strip()
+
+        # 规范化 params
+        raw_params = item.get('params', [])
+        params: list[dict] = []
+        if isinstance(raw_params, list):
+            for p in raw_params:
+                if isinstance(p, dict):
+                    params.append({
+                        'name': str(p.get('name', '')),
+                        'type': str(p.get('type', '')),
+                        'desc': str(p.get('desc', '')),
+                    })
+
+        # 规范化 returns
+        raw_ret = item.get('returns', {})
+        if isinstance(raw_ret, dict):
+            returns = {
+                'type': str(raw_ret.get('type', '')),
+                'desc': str(raw_ret.get('desc', '')),
+            }
+        else:
+            returns = {'type': str(raw_ret), 'desc': ''}
+
+        functions.append({
+            'name':       name,
+            'signature':  signature,
+            'start_line': start_line,
+            'end_line':   end_line,
+            'params':     params,
+            'returns':    returns,
+        })
+
+    return functions
+
+
+# ══════════════════════════════════════════════════════════════════
+#  主调度：按语言选择最优提取策略
+# ══════════════════════════════════════════════════════════════════
+
+def _extract_functions(
+    file_path: str,
+    file_name: str,
+    language: str,
+    repo_rel_path: str,
+) -> list[dict]:
+    """
+    函数提取入口，依次尝试：ast → ctags → LLM。
+
+    Returns
+    -------
+    list[dict]  每项键：name, signature, start_line, end_line, params, returns
+    """
+    # ── ① 无函数类语言直接跳过 ──────────────────────────────────────
+    if language in _NO_FUNC_LANGS:
+        return []
+
+    # ── ② Python：使用 ast 模块（精确） ─────────────────────────────
+    if language == 'Python':
+        funcs = _extract_funcs_python(file_path)
+        print(f"[file_analyzer]   策略=ast  → {len(funcs)} 个函数")
+        return funcs
+
+    # ── ③ 尝试 ctags ─────────────────────────────────────────────────
+    ctags_funcs = _extract_funcs_ctags(file_path, language)
+
+    if ctags_funcs is not None:
+        # ctags 可用
+        if ctags_funcs:
+            # 对 C/C++/Objective-C 补充 io 信息（从源码解析签名）
+            if language in ('C', 'C++', 'Objective-C'):
+                ctags_funcs = _enrich_ctags_io(ctags_funcs, file_path, repo_rel_path)
+            print(f"[file_analyzer]   策略=ctags → {len(ctags_funcs)} 个函数")
+            return ctags_funcs
+        else:
+            # ctags 返回空 → 对于 C/C++ 认为文件确实无函数；其他语言降级 LLM
+            if language in ('C', 'C++', 'Objective-C'):
+                print(f"[file_analyzer]   策略=ctags → 0 个函数（可信）")
+                return []
+            # 非 C/C++：ctags 可能不支持该语言格式，降级 LLM
+            print(f"[file_analyzer]   ctags 无结果，降级 LLM")
+
+    # ── ④ LLM 兜底 ───────────────────────────────────────────────────
+    funcs = _extract_funcs_llm(file_path, file_name, language, repo_rel_path)
+    print(f"[file_analyzer]   策略=LLM  → {len(funcs)} 个函数")
+    return funcs
+
+
+# ══════════════════════════════════════════════════════════════════
+#  analyze_file_func
+# ══════════════════════════════════════════════════════════════════
+
+def analyze_file_func(
+    repo_id: int,
+    db_path: str | None = None,
+    file_id: int | None = None,
+    force: bool = False,
+) -> dict[int, list[dict]]:
+    """
+    提取文件中所有函数/方法，写入 func 表并更新 file.funclist。
+
+    流程
+    ----
+    1. 获取目标文件列表（全部或指定 file_id）
+    2. 对每个文件调用 _extract_functions（ast / ctags / LLM 三档策略）
+    3. 将提取结果写入 func 表，更新 file.funclist
+    4. 支持 force 模式：已有记录时先清除再重建
+
+    写入字段
+    --------
+    func.name      : 函数名
+    func.signature : 完整签名字符串
+    func.place     : {"file_path": str, "start_line": int, "end_line": int}
+    func.io        : {"params": [...], "returns": {"type": str, "desc": str}}
+    file.funclist  : [{"func_id": int, "name": str, "brief": ""}]
+
+    Parameters
+    ----------
+    repo_id : int
+        目标仓库 id
+    db_path : str | None
+        SQLite 路径；不传则使用 config.DB_PATH
+    file_id : int | None
+        若指定，则只处理该文件；否则处理 repo 下所有文件
+    force : bool
+        True = 若文件已有 func 记录则先全部删除再重建；
+        False = 跳过已有记录（可用于断点续跑）
+
+    Returns
+    -------
+    dict[int, list[dict]]
+        {file_id: [{"func_id", "name", "start_line", "end_line"}, ...]}
+
+    Raises
+    ------
+    ValueError
+        repo_id 或 file_id 在数据库中不存在
+    """
+    _db = db_path or DB_PATH
+
+    # ── ① 校验仓库 ──────────────────────────────────────────────────
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(
+            f"[analyze_file_func] repo_id={repo_id} 不存在于数据库。"
+        )
+    repo_path = repo['path']
+
+    # ── ② 确定目标文件列表 ──────────────────────────────────────────
+    if file_id is not None:
+        file_rec = FileDB.get_by_id(file_id, db_path=_db)
+        if file_rec is None:
+            raise ValueError(
+                f"[analyze_file_func] file_id={file_id} 不存在于数据库。"
+            )
+        files = [file_rec]
+    else:
+        files = FileDB.list_by_repo(repo_id, db_path=_db)
+
+    if not files:
+        print(
+            f"[analyze_file_func] ⚠ repo_id={repo_id} 暂无文件记录，"
+            "请先执行 analyze_area_file。"
+        )
+        return {}
+
+    total_funcs_all = 0
+    result: dict[int, list[dict]] = {}
+
+    for file_rec in files:
+        fid       = file_rec['id']
+        fname     = file_rec['name']
+        fpath_rel = file_rec['path']
+        area_id   = file_rec['area_id']
+
+        # 优先取已分析的语言，否则实时推断
+        language = file_rec.get('language') or _detect_language(fname)
+
+        # 构建文件绝对路径
+        file_abs = os.path.join(repo_path, fpath_rel.replace('/', os.sep))
+        if not os.path.isfile(file_abs):
+            print(f"[analyze_file_func] ⚠ 文件不存在，跳过：{fpath_rel}")
+            result[fid] = []
+            continue
+
+        # ── ③ 处理已有 func 记录 ────────────────────────────────────
+        existing_funcs = FuncDB.list_by_file(fid, db_path=_db)
+        if existing_funcs:
+            if force:
+                for ef in existing_funcs:
+                    FuncDB.delete(ef['id'], db_path=_db)
+                print(
+                    f"[analyze_file_func] force 模式：已清除 {len(existing_funcs)} 条旧记录"
+                    f"（{fname}）"
+                )
+            else:
+                # 断点续跑：保留已有数据
+                result[fid] = [
+                    {
+                        'func_id':    ef['id'],
+                        'name':       ef['name'],
+                        'start_line': (ef.get('place') or {}).get('start_line', 0),
+                        'end_line':   (ef.get('place') or {}).get('end_line',   0),
+                    }
+                    for ef in existing_funcs
+                ]
+                print(
+                    f"[analyze_file_func] 跳过（已有 {len(existing_funcs)} 个 func）：{fname}"
+                    " —— 传入 force=True 可强制重建"
+                )
+                total_funcs_all += len(existing_funcs)
+                continue
+
+        # ── ④ 提取函数 ──────────────────────────────────────────────
+        print(f"[analyze_file_func] 处理：{fpath_rel}（{language}）")
+        extracted = _extract_functions(file_abs, fname, language, fpath_rel)
+
+        # ── ⑤ 写入 func 表 ──────────────────────────────────────────
+        funclist:          list[dict] = []   # 写回 file.funclist
+        file_func_results: list[dict] = []   # 供调用方使用
+
+        for func_info in extracted:
+            func_name  = func_info['name']
+            signature  = func_info.get('signature') or func_name
+            start_line = func_info.get('start_line', 0)
+            end_line   = func_info.get('end_line', start_line)
+            params     = func_info.get('params', [])
+            returns    = func_info.get('returns', {'type': '', 'desc': ''})
+
+            place: dict = {
+                'file_path':  fpath_rel,
+                'start_line': start_line,
+                'end_line':   end_line,
+            }
+            io: dict = {
+                'params':  params,
+                'returns': returns,
+            }
+
+            try:
+                func_id = FuncDB.create(
+                    repo_id   = repo_id,
+                    area_id   = area_id,
+                    file_id   = fid,
+                    name      = func_name,
+                    signature = signature,
+                    place     = place,
+                    io        = io,
+                    db_path   = _db,
+                )
+            except Exception as e:
+                # UNIQUE 约束冲突（同名同签名同文件）→ 跳过，不终止整体流程
+                print(
+                    f"[analyze_file_func]   ⚠ 函数 '{func_name}' 写入失败"
+                    f"（跳过）：{e}"
+                )
+                continue
+
+            funclist.append({
+                'func_id': func_id,
+                'name':    func_name,
+                'brief':   '',   # 留给 analyze_file_funclist_description（step14）填充
+            })
+            file_func_results.append({
+                'func_id':    func_id,
+                'name':       func_name,
+                'start_line': start_line,
+                'end_line':   end_line,
+            })
+
+        # ── ⑥ 更新 file.funclist ────────────────────────────────────
+        FileDB.update(fid, db_path=_db, funclist=funclist)
+
+        result[fid]      = file_func_results
+        total_funcs_all += len(file_func_results)
+
+        print(
+            f"[analyze_file_func]   ✓ {fname}：{len(file_func_results)} 个函数已入库"
+        )
+
+    total_files = len(files)
+    print(
+        f"\n[analyze_file_func] ✓ 完成：处理 {total_files} 个文件，"
+        f"共提取 {total_funcs_all} 个函数。"
+    )
+    return result
+```
+

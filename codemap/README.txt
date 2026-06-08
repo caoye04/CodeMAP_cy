@@ -26,3 +26,6 @@ python -m pytest "test/test_repo_analyzer_analyze_repo_area_in_minizip-ng.py" -v
 
 8. 在五个大小不一的仓库上进行 analyze_repo_area 单元测试
 python -m pytest "test/test_repo_analyzer_analyze_repo_area_in_five_repo.py" -v -s
+
+9. 在目标仓库minizip-ng上进行 analyze_area_file 单元测试
+python -m pytest "test/test_area_analyzer_analyze_area_file_in_minizip-ng.py" -v
