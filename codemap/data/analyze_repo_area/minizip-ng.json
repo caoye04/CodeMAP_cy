@@ -1,0 +1,72 @@
+{
+  "repo_id": 1,
+  "repo_name": "minizip-ng",
+  "repo_path": "C:\\Users\\caoye04\\Desktop\\repo_4_codemap\\minizip-ng",
+  "main_language": "C",
+  "llm_raw": {
+    "areas": [
+      {
+        "name": "build_system",
+        "path": "cmake",
+        "rationale": "包含所有用于配置、编译和构建项目的CMake脚本，是项目构建流程的独立模块。",
+        "brief": "项目的构建配置和脚本。"
+      },
+      {
+        "name": "compatibility_layer",
+        "path": "compat",
+        "rationale": "提供了与旧版Minizip API兼容的接口和实现，方便现有项目迁移或保持向后兼容性。",
+        "brief": "兼容旧版Minizip API的接口和实现。"
+      },
+      {
+        "name": "documentation",
+        "path": "doc",
+        "rationale": "包含所有用户指南、API参考和技术说明文档，是项目的知识库。",
+        "brief": "项目的各类文档和说明。"
+      },
+      {
+        "name": "testing",
+        "path": "test",
+        "rationale": "包含所有单元测试、集成测试和模糊测试代码及相关数据，确保库的功能正确性和稳定性。",
+        "brief": "项目的功能和性能测试。"
+      },
+      {
+        "name": "core_library",
+        "path": ".",
+        "rationale": "包含minizip-ng库的核心实现，涵盖ZIP文件操作、多种压缩流处理、加密功能、操作系统抽象层以及基于库的命令行工具示例。",
+        "brief": "minizip-ng库的核心功能、压缩算法、加密模块和示例应用。"
+      }
+    ]
+  },
+  "areas": [
+    {
+      "name": "build_system",
+      "path": "cmake",
+      "rationale": "包含所有用于配置、编译和构建项目的CMake脚本，是项目构建流程的独立模块。",
+      "brief": "项目的构建配置和脚本。"
+    },
+    {
+      "name": "compatibility_layer",
+      "path": "compat",
+      "rationale": "提供了与旧版Minizip API兼容的接口和实现，方便现有项目迁移或保持向后兼容性。",
+      "brief": "兼容旧版Minizip API的接口和实现。"
+    },
+    {
+      "name": "documentation",
+      "path": "doc",
+      "rationale": "包含所有用户指南、API参考和技术说明文档，是项目的知识库。",
+      "brief": "项目的各类文档和说明。"
+    },
+    {
+      "name": "testing",
+      "path": "test",
+      "rationale": "包含所有单元测试、集成测试和模糊测试代码及相关数据，确保库的功能正确性和稳定性。",
+      "brief": "项目的功能和性能测试。"
+    },
+    {
+      "name": "core_library",
+      "path": ".",
+      "rationale": "包含minizip-ng库的核心实现，涵盖ZIP文件操作、多种压缩流处理、加密功能、操作系统抽象层以及基于库的命令行工具示例。",
+      "brief": "minizip-ng库的核心功能、压缩算法、加密模块和示例应用。"
+    }
+  ]
+}

@@ -1,0 +1,120 @@
+{
+  "repo_id": 1,
+  "repo_name": "tmux",
+  "repo_path": "C:\\Users\\caoye04\\Desktop\\repo_4_codemap\\tmux",
+  "main_language": "C",
+  "llm_raw": {
+    "areas": [
+      {
+        "name": "core_runtime",
+        "path": ".",
+        "rationale": "包含 tmux 应用程序的核心运行时组件，如服务器、客户端、会话、窗口管理以及基础系统交互和通用工具函数。",
+        "brief": "包含 tmux 核心运行时组件、会话/窗口管理及基础系统交互。"
+      },
+      {
+        "name": "command_config",
+        "path": ".",
+        "rationale": "负责解析和执行用户命令，管理 tmux 的配置选项、键绑定和命令行参数处理。",
+        "brief": "处理用户命令解析、执行、配置选项和键绑定。"
+      },
+      {
+        "name": "terminal_display",
+        "path": ".",
+        "rationale": "管理终端输入输出、屏幕绘制、字符编码、视觉样式、剪贴板和图像显示等所有与终端交互相关的逻辑。",
+        "brief": "管理终端交互、屏幕绘制、字符编码、视觉样式和剪贴板。"
+      },
+      {
+        "name": "layout_status",
+        "path": ".",
+        "rationale": "专注于管理窗口和窗格的布局排布，以及状态栏内容的格式化和显示。",
+        "brief": "管理窗口/窗格布局、状态栏格式化和显示。"
+      },
+      {
+        "name": "platform_compatibility",
+        "path": "compat/",
+        "rationale": "包含用于提供跨平台兼容性的函数实现，以及针对不同操作系统（如 Linux, macOS, OpenBSD 等）的特定代码。",
+        "brief": "提供跨平台兼容性函数和操作系统特定实现。"
+      },
+      {
+        "name": "regression_testing",
+        "path": "regress/",
+        "rationale": "包含大量的回归测试脚本和配置文件，用于验证 tmux 在各种场景下的功能正确性。",
+        "brief": "包含回归测试脚本和配置文件，验证功能正确性。"
+      },
+      {
+        "name": "fuzz_testing",
+        "path": "fuzz/",
+        "rationale": "包含用于模糊测试的源代码和配置文件，旨在发现潜在的安全漏洞和健壮性问题。",
+        "brief": "包含模糊测试代码，用于发现潜在漏洞。"
+      },
+      {
+        "name": "build_meta_docs",
+        "path": ".",
+        "rationale": "包含项目的构建配置、自动化脚本、许可证信息、变更日志、用户手册和项目元数据。",
+        "brief": "包含构建配置、项目文档、许可证和元数据。"
+      },
+      {
+        "name": "dev_tools",
+        "path": "tools/",
+        "rationale": "包含各种辅助开发、调试、演示和分析的实用脚本和文件。",
+        "brief": "提供辅助开发、调试和演示的实用工具。"
+      },
+      {
+        "name": "branding_assets",
+        "path": "logo/",
+        "rationale": "包含 tmux 项目的品牌标志、图标和其他视觉资产。",
+        "brief": "包含 tmux 项目的品牌标志和图标。"
+      },
+      {
+        "name": "presentations",
+        "path": "presentations/",
+        "rationale": "包含与 tmux 相关的公开演示文稿和幻灯片。",
+        "brief": "包含 tmux 相关的公开演示文稿。"
+      }
+    ]
+  },
+  "areas": [
+    {
+      "name": "core_runtime",
+      "path": ".",
+      "rationale": "包含 tmux 应用程序的核心运行时组件，如服务器、客户端、会话、窗口管理以及基础系统交互和通用工具函数。",
+      "brief": "包含 tmux 核心运行时组件、会话/窗口管理及基础系统交互。"
+    },
+    {
+      "name": "platform_compatibility",
+      "path": "compat/",
+      "rationale": "包含用于提供跨平台兼容性的函数实现，以及针对不同操作系统（如 Linux, macOS, OpenBSD 等）的特定代码。",
+      "brief": "提供跨平台兼容性函数和操作系统特定实现。"
+    },
+    {
+      "name": "regression_testing",
+      "path": "regress/",
+      "rationale": "包含大量的回归测试脚本和配置文件，用于验证 tmux 在各种场景下的功能正确性。",
+      "brief": "包含回归测试脚本和配置文件，验证功能正确性。"
+    },
+    {
+      "name": "fuzz_testing",
+      "path": "fuzz/",
+      "rationale": "包含用于模糊测试的源代码和配置文件，旨在发现潜在的安全漏洞和健壮性问题。",
+      "brief": "包含模糊测试代码，用于发现潜在漏洞。"
+    },
+    {
+      "name": "dev_tools",
+      "path": "tools/",
+      "rationale": "包含各种辅助开发、调试、演示和分析的实用脚本和文件。",
+      "brief": "提供辅助开发、调试和演示的实用工具。"
+    },
+    {
+      "name": "branding_assets",
+      "path": "logo/",
+      "rationale": "包含 tmux 项目的品牌标志、图标和其他视觉资产。",
+      "brief": "包含 tmux 项目的品牌标志和图标。"
+    },
+    {
+      "name": "presentations",
+      "path": "presentations/",
+      "rationale": "包含与 tmux 相关的公开演示文稿和幻灯片。",
+      "brief": "包含 tmux 相关的公开演示文稿。"
+    }
+  ]
+}

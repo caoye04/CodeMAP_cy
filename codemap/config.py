@@ -1,6 +1,5 @@
 """
 config.py —— 全局配置入口
-后续 API Key、模型名、CodeQL 路径等均在此集中管理。
 """
 import os
 # ------------------------------------------------------------------
@@ -11,11 +10,11 @@ DATA_DIR     = os.path.join(PROJECT_ROOT, 'data')
 DB_PATH      = os.path.join(DATA_DIR, 'codemap.db')
 
 # ------------------------------------------------------------------
-#  LLM（占位，后续填入）
+#  LLM
 # ------------------------------------------------------------------
-LLM_API_KEY  = os.getenv('OPENAI_API_KEY', '')
-LLM_BASE_URL = os.getenv('LLM_BASE_URL', 'https://api.openai.com/v1')
-LLM_MODEL    = os.getenv('LLM_MODEL', 'gpt-4o')
+LLM_API_KEY  = os.getenv('LLM_API_KEY',  'sk-MJjAy6jCzTNL2paHSbrFE9LVArxlkoFzevM145VXOW83xSKv')
+LLM_BASE_URL = os.getenv('LLM_BASE_URL', 'https://api.ezai88.com')
+LLM_MODEL    = os.getenv('LLM_MODEL',    'gemini-2.5-flash')
 
 # ------------------------------------------------------------------
 #  CodeQL（占位，后续填入）

@@ -6,15 +6,17 @@ CodeMAP 仓库层分析器
 实现：
   - init_repo              : 初始化仓库记录，建库建表，写入 repo:name / repo:path
   - analyze_repo_language  : 扫描仓库文件，统计语言字节数和占比，写入 repo:language
+  - analyze_repo_area      : LLM 分析仓库模块划分，写入 area 表 / repo:arealist
 """
 
+import json as _json
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from db.dao import init_db, RepoDB
-from config import DB_PATH
+from db.dao import init_db, RepoDB, AreaDB
+from config import DB_PATH, DATA_DIR
 
 # ------------------------------------------------------------------
 #  常量：扩展名 → 编程语言
@@ -330,3 +332,311 @@ def analyze_repo_language(
         )
 
     return language_data
+
+# ==================================================================
+#  analyze_repo_area —— 辅助：目录树 & README
+# ==================================================================
+
+def _build_dir_tree(repo_path: str, max_depth: int = 3, max_chars: int = 8000) -> str:
+    """
+    生成仓库目录树字符串（类 Unix `tree` 命令格式）。
+
+    Parameters
+    ----------
+    repo_path : str
+        仓库根目录绝对路径
+    max_depth : int
+        最大递归深度（从根算起，根的直接子项为第 1 层）
+    max_chars : int
+        输出字符上限，超出后追加截断提示
+
+    Returns
+    -------
+    str
+        多行字符串，可直接放入 prompt
+    """
+    lines: list[str] = []
+    root_name = os.path.basename(repo_path.rstrip(os.sep))
+    lines.append(f"{root_name}/")
+
+    def _walk(path: str, prefix: str, depth: int) -> None:
+        if depth > max_depth:
+            return
+
+        try:
+            raw = list(os.scandir(path))
+        except PermissionError:
+            return
+
+        # 过滤忽略目录和隐藏目录
+        entries = [
+            e for e in raw
+            if not (e.is_dir() and (e.name in _IGNORE_DIRS or e.name.startswith('.')))
+        ]
+        # 排序：目录在前，同类按名称字母序（忽略大小写）
+        entries.sort(key=lambda e: (not e.is_dir(), e.name.lower()))
+
+        for i, entry in enumerate(entries):
+            is_last   = (i == len(entries) - 1)
+            connector = '└── ' if is_last else '├── '
+            suffix    = '/' if entry.is_dir() else ''
+            lines.append(f"{prefix}{connector}{entry.name}{suffix}")
+
+            if entry.is_dir() and depth < max_depth:
+                child_prefix = prefix + ('    ' if is_last else '│   ')
+                _walk(entry.path, child_prefix, depth + 1)
+
+    _walk(repo_path, '', 1)
+
+    result = '\n'.join(lines)
+    if len(result) > max_chars:
+        result = result[:max_chars] + '\n...(目录树已截断，超过字符上限)'
+    return result
+
+
+def _read_readme(repo_path: str, max_chars: int = 3000) -> str:
+    """
+    读取仓库根目录的 README 文件内容（截取前 max_chars 字符）。
+
+    Returns
+    -------
+    str
+        README 内容，或 "（未找到 README 文件）"
+    """
+    candidates = [
+        'README.md', 'README.rst', 'README.txt', 'README',
+        'readme.md', 'readme.rst', 'readme.txt', 'readme',
+        'Readme.md', 'Readme.rst',
+    ]
+    for name in candidates:
+        full_path = os.path.join(repo_path, name)
+        if not os.path.isfile(full_path):
+            continue
+        try:
+            with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read(max_chars)
+            file_size = os.path.getsize(full_path)
+            suffix = '\n\n...(README 已截断，仅展示前部分)' if file_size > max_chars else ''
+            print(f"[analyze_repo_area] 读取 README：{name}（{len(content)} 字符）")
+            return content + suffix
+        except OSError:
+            continue
+    return '（未找到 README 文件）'
+
+
+# ==================================================================
+#  analyze_repo_area
+# ==================================================================
+
+def analyze_repo_area(
+    repo_id: int,
+    db_path: str | None = None,
+    force: bool = False,
+) -> list[dict]:
+    """
+    使用 LLM 对仓库进行模块划分（area 分层），并将结果持久化到数据库和中间文件。
+
+    流程
+    ----
+    1. 构建仓库目录树（最多 3 层）
+    2. 读取 README（作为 LLM 背景输入）
+    3. 调用 LLM 生成 area 划分方案（name / path / rationale / brief）
+    4. 校验 LLM 给出的 path 在磁盘上确实存在，去掉无效项
+    5. 中间产物 JSON → data/analyze_repo_area/<repo_name>.json
+    6. 写数据库：
+       - area 表：为每个 area 创建记录（name / path / rationale）
+       - repo 表：更新 arealist 字段（存简要索引）
+
+    Parameters
+    ----------
+    repo_id : int
+        目标仓库的 id（由 init_repo 返回）
+    db_path : str | None
+        SQLite 数据库路径；不传则使用 config.DB_PATH
+    force : bool
+        若已存在 area 记录，True = 先删除再重建，False = 抛出 ValueError
+
+    Returns
+    -------
+    list[dict]
+        已入库的 area 信息列表，每项：
+        {
+            "area_id":   int,
+            "name":      str,
+            "path":      str,   # 相对仓库根
+            "rationale": str,
+            "brief":     str,
+        }
+
+    Raises
+    ------
+    ValueError
+        repo_id 不存在 / force=False 且已有 area 记录 / LLM 无有效输出
+    RuntimeError
+        LLM API 调用失败
+    """
+    _db = db_path or DB_PATH
+
+    # ── ① 取仓库信息 ────────────────────────────────────────────────
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(
+            f"[analyze_repo_area] repo_id={repo_id} 在数据库中不存在。"
+        )
+
+    repo_path = repo['path']
+    repo_name = repo['name']
+    print(f"[analyze_repo_area] 目标仓库：{repo_name}（{repo_path}）")
+
+    # ── ② 处理已有 area 记录 ────────────────────────────────────────
+    existing = AreaDB.list_by_repo(repo_id, db_path=_db)
+    if existing:
+        if force:
+            for a in existing:
+                AreaDB.delete(a['id'], db_path=_db)
+            print(f"[analyze_repo_area] 已清除 {len(existing)} 条旧 area 记录。")
+        else:
+            raise ValueError(
+                f"[analyze_repo_area] repo_id={repo_id} 已有 {len(existing)} 个 area 记录。"
+                " 如需重新分析，请传入 force=True。"
+            )
+
+    # ── ③ 收集上下文信息 ────────────────────────────────────────────
+    language_info = repo.get('language') or {}
+    main_language = (
+        language_info.get('main', 'Unknown')
+        if isinstance(language_info, dict)
+        else 'Unknown'
+    )
+
+    dir_tree       = _build_dir_tree(repo_path, max_depth=3)
+    readme_content = _read_readme(repo_path)
+
+    print(
+        f"[analyze_repo_area] 上下文准备完毕 | "
+        f"主语言：{main_language} | "
+        f"目录树：{len(dir_tree)} 字符 | "
+        f"README：{len(readme_content)} 字符"
+    )
+
+    # ── ④ 调用 LLM ──────────────────────────────────────────────────
+    # 延迟导入：仅在需要时加载 LLM 模块，避免无关步骤引入额外依赖
+    from llm.client  import chat_completion_json
+    from llm.prompts import ANALYZE_REPO_AREA_SYSTEM, ANALYZE_REPO_AREA_USER
+    import config as _cfg
+
+    user_content = ANALYZE_REPO_AREA_USER.format(
+        repo_name      = repo_name,
+        main_language  = main_language,
+        dir_tree       = dir_tree,
+        readme_content = readme_content,
+    )
+
+    messages = [
+        {"role": "system", "content": ANALYZE_REPO_AREA_SYSTEM},
+        {"role": "user",   "content": user_content},
+    ]
+
+    print(f"[analyze_repo_area] 调用 LLM（模型：{_cfg.LLM_MODEL}）…")
+    llm_raw = chat_completion_json(messages=messages, temperature=0.3)
+    print(f"[analyze_repo_area] LLM 响应已接收，开始解析…")
+
+    # ── ⑤ 解析 LLM 输出结构 ────────────────────────────────────────
+    if isinstance(llm_raw, dict) and 'areas' in llm_raw:
+        areas_raw: list[dict] = llm_raw['areas']
+    elif isinstance(llm_raw, list):
+        areas_raw = llm_raw
+    else:
+        raise ValueError(
+            f"[analyze_repo_area] LLM 输出结构不符合预期（类型：{type(llm_raw)}）：\n"
+            f"{_json.dumps(llm_raw, ensure_ascii=False, indent=2)[:600]}"
+        )
+
+    # ── ⑥ 字段提取 + 路径校验 + 去重 ───────────────────────────────
+    seen_paths: set[str] = set()
+    validated:  list[dict] = []
+
+    for item in areas_raw:
+        name      = str(item.get('name',      '')).strip()
+        path      = str(item.get('path',      '')).strip()
+        rationale = str(item.get('rationale', '')).strip()
+        brief     = str(item.get('brief',     '')).strip()
+
+        # 必填字段检查
+        if not name or not path:
+            print(f"[analyze_repo_area] ⚠ 跳过缺少 name/path 的条目：{item}")
+            continue
+
+        # 路径去重
+        if path in seen_paths:
+            print(f"[analyze_repo_area] ⚠ 跳过重复 path：{path}")
+            continue
+        seen_paths.add(path)
+
+        # 磁盘存在性校验
+        abs_path = repo_path if path == '.' else os.path.join(repo_path, path)
+        if not os.path.exists(abs_path):
+            print(f"[analyze_repo_area] ⚠ path 在磁盘上不存在，已跳过：{path}")
+            continue
+
+        validated.append({
+            'name':      name,
+            'path':      path,
+            'rationale': rationale,
+            'brief':     brief,
+        })
+
+    if not validated:
+        raise ValueError(
+            "[analyze_repo_area] 所有 LLM 输出的 area 均未通过校验，请查看上方日志。"
+        )
+
+    # ── ⑦ 保存中间产物 JSON ─────────────────────────────────────────
+    output_dir = os.path.join(DATA_DIR, 'analyze_repo_area')
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"{repo_name}.json")
+
+    intermediate = {
+        'repo_id':       repo_id,
+        'repo_name':     repo_name,
+        'repo_path':     repo_path,
+        'main_language': main_language,
+        'llm_raw':       llm_raw,
+        'areas':         validated,
+    }
+    with open(output_path, 'w', encoding='utf-8') as f:
+        _json.dump(intermediate, f, ensure_ascii=False, indent=2)
+    print(f"[analyze_repo_area] ✓ 中间产物 → {output_path}")
+
+    # ── ⑧ 写入数据库 ────────────────────────────────────────────────
+    arealist: list[dict] = []
+
+    for area_data in validated:
+        area_id = AreaDB.create(
+            repo_id   = repo_id,
+            name      = area_data['name'],
+            path      = area_data['path'],
+            rationale = area_data['rationale'],
+            db_path   = _db,
+        )
+        area_data['area_id'] = area_id  # 回写 id，供调用方使用
+
+        arealist.append({
+            'area_id': area_id,
+            'name':    area_data['name'],
+            'brief':   area_data['brief'],
+        })
+
+        print(
+            f"[analyze_repo_area]   + [{area_id:3d}] "
+            f"{area_data['name']:30s}  path={area_data['path']}"
+        )
+
+    # 更新 repo.arealist（简要索引）
+    RepoDB.update(repo_id, db_path=_db, arealist=arealist)
+
+    print(
+        f"[analyze_repo_area] ✓ 完成：{len(validated)} 个 area 已入库，"
+        f"repo.arealist 已更新。"
+    )
+    return validated
