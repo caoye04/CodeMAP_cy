@@ -17,6 +17,7 @@ LLM_BASE_URL = os.getenv('LLM_BASE_URL', 'https://api.ezai88.com')
 LLM_MODEL    = os.getenv('LLM_MODEL',    'gemini-2.5-flash')
 
 # ------------------------------------------------------------------
-#  CodeQL（占位，后续填入）
+#  CodeQL
 # ------------------------------------------------------------------
-CODEQL_BIN   = os.getenv('CODEQL_BIN', 'codeql')   # codeql 可执行文件路径
+# CODEQL_BIN   = os.getenv('CODEQL_BIN', r'C:\tools\codeql\codeql.exe')   # codeql 可执行文件路径
+# CODEQL_DB_DIR = os.path.join(DATA_DIR, 'codeql_dbs')

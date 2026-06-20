@@ -1,0 +1,376 @@
+11:43:02  INFO     ======================================================================
+11:43:02  INFO     五库 analyze_repo_area 集成观测测试  开始
+11:43:02  INFO     基础路径  : C:\Users\caoye04\Desktop\repo_4_codemap
+11:43:02  INFO     日志文件  : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\test\log\five_real_repo_area_20260608_114302.log
+11:43:02  INFO     仓库列表  : libuv / linenoise / minizip-ng / sqlite / tmux
+11:43:02  INFO     
+11:43:02  INFO     各仓库目录状态：
+11:43:02  INFO       libuv            [✓ 存在]  C:\Users\caoye04\Desktop\repo_4_codemap\libuv
+11:43:02  INFO       linenoise        [✓ 存在]  C:\Users\caoye04\Desktop\repo_4_codemap\linenoise
+11:43:02  INFO       minizip-ng       [✓ 存在]  C:\Users\caoye04\Desktop\repo_4_codemap\minizip-ng
+11:43:02  INFO       sqlite           [✓ 存在]  C:\Users\caoye04\Desktop\repo_4_codemap\sqlite
+11:43:02  INFO       tmux             [✓ 存在]  C:\Users\caoye04\Desktop\repo_4_codemap\tmux
+11:43:02  INFO     ======================================================================
+11:43:02  INFO     
+11:43:02  INFO     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11:43:02  INFO     ▶ 用例开始  [libuv]
+11:43:02  INFO     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11:43:02  INFO     
+11:43:02  INFO       仓库名称  : libuv
+11:43:02  INFO       仓库路径  : C:\Users\caoye04\Desktop\repo_4_codemap\libuv
+11:43:02  INFO       数据库    : C:\Users\caoye04\AppData\Local\Temp\pytest-of-caoye04\pytest-11\test_observe_analyze_repo_area0\libuv.db
+11:43:02  INFO     
+11:43:02  INFO       [1/3] init_repo("libuv")
+11:43:02  INFO             → 返回 repo_id = 1
+11:43:02  INFO     
+11:43:02  INFO       [2/3] analyze_repo_language(repo_id=1)
+11:43:02  INFO             → 主语言 = C，语言种数 = 9，总字节数 = 3,739,644
+11:43:02  INFO     
+11:43:02  INFO       [3/3] analyze_repo_area(repo_id=1)
+11:43:29  INFO             → 共 7 个 area：project_root_metadata, core_api_headers, core_library_implementation, documentation, tests_benchmarks, cmake_toolchains, autoconf_macros
+11:43:29  INFO     
+11:43:29  INFO       ┌── Area 层级快照  [libuv  /  analyze_repo_area 完成后]
+11:43:29  INFO       │  repo.arealist（7 项）：
+11:43:29  INFO       │    [  1]  project_root_metadata         项目的顶层配置、元数据和通用文件。
+11:43:29  INFO       │    [  2]  core_api_headers              定义 libuv 库的公共 API 接口和数据结构。
+11:43:29  INFO       │    [  3]  core_library_implementation   libuv 库的核心功能实现，包含通用和平台特定代码。
+11:43:29  INFO       │    [  4]  documentation                 项目的官方文档、指南和示例代码。
+11:43:29  INFO       │    [  5]  tests_benchmarks              验证库功能和性能的测试用例及基准测试。
+11:43:29  INFO       │    [  6]  cmake_toolchains              CMake 构建系统专用的工具链配置。
+11:43:29  INFO       │    [  7]  autoconf_macros               Autoconf 构建系统所需的 M4 宏定义。
+11:43:29  INFO       │
+11:43:29  INFO       │  area 表记录（共 7 条）：
+11:43:29  INFO       │  ───────────────────────────────────────────────
+11:43:29  INFO       │  id        : 1
+11:43:29  INFO       │  name      : project_root_metadata
+11:43:29  INFO       │  path      : .
+11:43:29  INFO       │  rationale : 包含项目的顶层元数据，如 README、许可证文件、项目图片以及主要的构建入口文件（如顶层 CMakeLists.txt，尽管未在目录树中完全展示）。
+11:43:29  INFO       │  ───────────────────────────────────────────────
+11:43:29  INFO       │  id        : 6
+11:43:29  INFO       │  name      : cmake_toolchains
+11:43:29  INFO       │  path      : cmake-toolchains
+11:43:29  INFO       │  rationale : 包含用于 CMake 构建系统的特定工具链定义，主要用于交叉编译等高级构建场景。
+11:43:29  INFO       │  ───────────────────────────────────────────────
+11:43:29  INFO       │  id        : 4
+11:43:29  INFO       │  name      : documentation
+11:43:29  INFO       │  path      : docs
+11:43:29  INFO       │  rationale : 包含所有用户和开发者文档的源文件、构建脚本以及示例代码，用于生成项目文档。
+11:43:29  INFO       │  ───────────────────────────────────────────────
+11:43:29  INFO       │  id        : 2
+11:43:29  INFO       │  name      : core_api_headers
+11:43:29  INFO       │  path      : include
+11:43:29  INFO       │  rationale : 包含所有对外暴露的头文件，定义了 libuv 的公共 API 接口和数据结构，供应用程序使用。
+11:43:29  INFO       │  ───────────────────────────────────────────────
+11:43:29  INFO       │  id        : 7
+11:43:29  INFO       │  name      : autoconf_macros
+11:43:29  INFO       │  path      : m4
+11:43:29  INFO       │  rationale : 包含 Autoconf 构建系统所需的 M4 宏文件，用于生成 configure 脚本。
+11:43:29  INFO       │  ───────────────────────────────────────────────
+11:43:29  INFO       │  id        : 3
+11:43:29  INFO       │  name      : core_library_implementation
+11:43:29  INFO       │  path      : src
+11:43:29  INFO       │  rationale : 包含 libuv 库的所有核心实现代码，包括跨平台通用逻辑以及 Unix 和 Windows 平台特定的异步 I/O、事件循环等功能。
+11:43:29  INFO       │  ───────────────────────────────────────────────
+11:43:29  INFO       │  id        : 5
+11:43:29  INFO       │  name      : tests_benchmarks
+11:43:29  INFO       │  path      : test
+11:43:29  INFO       │  rationale : 包含用于验证库功能正确性的单元测试、集成测试以及评估性能的基准测试。
+11:43:30  INFO       └────────────────────────────────────────────────────
+11:43:30  INFO     ◀ 用例结束  [libuv]
+11:43:30  INFO     
+11:43:30  INFO     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11:43:30  INFO     ▶ 用例开始  [linenoise]
+11:43:30  INFO     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11:43:30  INFO     
+11:43:30  INFO       仓库名称  : linenoise
+11:43:30  INFO       仓库路径  : C:\Users\caoye04\Desktop\repo_4_codemap\linenoise
+11:43:30  INFO       数据库    : C:\Users\caoye04\AppData\Local\Temp\pytest-of-caoye04\pytest-11\test_observe_analyze_repo_area1\linenoise.db
+11:43:30  INFO     
+11:43:30  INFO       [1/3] init_repo("linenoise")
+11:43:30  INFO             → 返回 repo_id = 1
+11:43:30  INFO     
+11:43:30  INFO       [2/3] analyze_repo_language(repo_id=1)
+11:43:30  INFO             → 主语言 = C，语言种数 = 2，总字节数 = 147,591
+11:43:30  INFO     
+11:43:30  INFO       [3/3] analyze_repo_area(repo_id=1)
+11:43:40  INFO             → 共 1 个 area：linenoise_root
+11:43:40  INFO     
+11:43:40  INFO       ┌── Area 层级快照  [linenoise  /  analyze_repo_area 完成后]
+11:43:40  INFO       │  repo.arealist（1 项）：
+11:43:40  INFO       │    [  1]  linenoise_root                包含 linenoise 核心库、示例、测试和项目配置。
+11:43:40  INFO       │
+11:43:40  INFO       │  area 表记录（共 1 条）：
+11:43:40  INFO       │  ───────────────────────────────────────────────
+11:43:40  INFO       │  id        : 1
+11:43:41  INFO       │  name      : linenoise_root
+11:43:41  INFO       │  path      : .
+11:43:41  INFO       │  rationale : 仓库结构扁平，所有核心库文件（linenoise.c/h）、示例（example.c）、测试（linenoise-test.c）以及项目配置（Makefile等）均位于根目录，共同构成完整的 l...
+11:43:41  INFO       └────────────────────────────────────────────────────
+11:43:41  INFO     ◀ 用例结束  [linenoise]
+11:43:41  INFO     
+11:43:41  INFO     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11:43:41  INFO     ▶ 用例开始  [minizip-ng]
+11:43:41  INFO     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11:43:41  INFO     
+11:43:41  INFO       仓库名称  : minizip-ng
+11:43:41  INFO       仓库路径  : C:\Users\caoye04\Desktop\repo_4_codemap\minizip-ng
+11:43:41  INFO       数据库    : C:\Users\caoye04\AppData\Local\Temp\pytest-of-caoye04\pytest-11\test_observe_analyze_repo_area2\minizip-ng.db
+11:43:41  INFO     
+11:43:41  INFO       [1/3] init_repo("minizip-ng")
+11:43:41  INFO             → 返回 repo_id = 1
+11:43:41  INFO     
+11:43:41  INFO       [2/3] analyze_repo_language(repo_id=1)
+11:43:41  INFO             → 主语言 = C，语言种数 = 5，总字节数 = 901,620
+11:43:41  INFO     
+11:43:41  INFO       [3/3] analyze_repo_area(repo_id=1)
+11:43:54  INFO             → 共 5 个 area：build_system, compatibility_layer, documentation, testing, core_library
+11:43:54  INFO     
+11:43:54  INFO       ┌── Area 层级快照  [minizip-ng  /  analyze_repo_area 完成后]
+11:43:54  INFO       │  repo.arealist（5 项）：
+11:43:54  INFO       │    [  1]  build_system                  项目的构建配置和脚本。
+11:43:54  INFO       │    [  2]  compatibility_layer           兼容旧版Minizip API的接口和实现。
+11:43:54  INFO       │    [  3]  documentation                 项目的各类文档和说明。
+11:43:54  INFO       │    [  4]  testing                       项目的功能和性能测试。
+11:43:54  INFO       │    [  5]  core_library                  minizip-ng库的核心功能、压缩算法、加密模块和示例应用。
+11:43:54  INFO       │
+11:43:54  INFO       │  area 表记录（共 5 条）：
+11:43:54  INFO       │  ───────────────────────────────────────────────
+11:43:54  INFO       │  id        : 5
+11:43:54  INFO       │  name      : core_library
+11:43:54  INFO       │  path      : .
+11:43:54  INFO       │  rationale : 包含minizip-ng库的核心实现，涵盖ZIP文件操作、多种压缩流处理、加密功能、操作系统抽象层以及基于库的命令行工具示例。
+11:43:54  INFO       │  ───────────────────────────────────────────────
+11:43:54  INFO       │  id        : 1
+11:43:54  INFO       │  name      : build_system
+11:43:54  INFO       │  path      : cmake
+11:43:54  INFO       │  rationale : 包含所有用于配置、编译和构建项目的CMake脚本，是项目构建流程的独立模块。
+11:43:54  INFO       │  ───────────────────────────────────────────────
+11:43:54  INFO       │  id        : 2
+11:43:54  INFO       │  name      : compatibility_layer
+11:43:54  INFO       │  path      : compat
+11:43:54  INFO       │  rationale : 提供了与旧版Minizip API兼容的接口和实现，方便现有项目迁移或保持向后兼容性。
+11:43:54  INFO       │  ───────────────────────────────────────────────
+11:43:54  INFO       │  id        : 3
+11:43:54  INFO       │  name      : documentation
+11:43:54  INFO       │  path      : doc
+11:43:54  INFO       │  rationale : 包含所有用户指南、API参考和技术说明文档，是项目的知识库。
+11:43:54  INFO       │  ───────────────────────────────────────────────
+11:43:54  INFO       │  id        : 4
+11:43:54  INFO       │  name      : testing
+11:43:54  INFO       │  path      : test
+11:43:54  INFO       │  rationale : 包含所有单元测试、集成测试和模糊测试代码及相关数据，确保库的功能正确性和稳定性。
+11:43:54  INFO       └────────────────────────────────────────────────────
+11:43:54  INFO     ◀ 用例结束  [minizip-ng]
+11:43:54  INFO     
+11:43:54  INFO     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11:43:54  INFO     ▶ 用例开始  [sqlite]
+11:43:54  INFO     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11:43:54  INFO     
+11:43:54  INFO       仓库名称  : sqlite
+11:43:54  INFO       仓库路径  : C:\Users\caoye04\Desktop\repo_4_codemap\sqlite
+11:43:54  INFO       数据库    : C:\Users\caoye04\AppData\Local\Temp\pytest-of-caoye04\pytest-11\test_observe_analyze_repo_area3\sqlite.db
+11:43:54  INFO     
+11:43:54  INFO       [1/3] init_repo("sqlite")
+11:43:54  INFO             → 返回 repo_id = 1
+11:43:54  INFO     
+11:43:54  INFO       [2/3] analyze_repo_language(repo_id=1)
+11:43:54  INFO             → 主语言 = C，语言种数 = 9，总字节数 = 16,952,277
+11:43:54  INFO     
+11:43:54  INFO       [3/3] analyze_repo_area(repo_id=1)
+11:44:21  INFO             → 共 18 个 area：core_engine, build_autoconf, build_autosetup, documentation, assets, contributions, fts3_extension, fts5_extension, icu_extension, rtree_extension, session_extension, misc_extensions, expert_extension, integrity_check_extension, resumable_backup_extension, database_recovery_extension, jni_extension, qrf_extension
+11:44:21  INFO     
+11:44:21  INFO       ┌── Area 层级快照  [sqlite  /  analyze_repo_area 完成后]
+11:44:21  INFO       │  repo.arealist（18 项）：
+11:44:21  INFO       │    [  1]  core_engine                   SQLite数据库引擎的核心实现。
+11:44:21  INFO       │    [  2]  build_autoconf                基于Autoconf的构建系统配置。
+11:44:21  INFO       │    [  3]  build_autosetup               自定义Tcl-based构建系统。
+11:44:21  INFO       │    [  4]  documentation                 项目的各类技术文档和指南。
+11:44:21  INFO       │    [  5]  assets                        项目的视觉艺术和图标资源。
+11:44:21  INFO       │    [  6]  contributions                 社区贡献的辅助工具和脚本。
+11:44:21  INFO       │    [  7]  fts3_extension                SQLite的全文搜索功能（版本3）。
+11:44:21  INFO       │    [  8]  fts5_extension                SQLite的全文搜索功能（版本5）。
+11:44:21  INFO       │    [  9]  icu_extension                 集成ICU库以支持高级Unicode处理。
+11:44:21  INFO       │    [ 10]  rtree_extension               R-树空间索引扩展。
+11:44:21  INFO       │    [ 11]  session_extension             数据库会话管理和变更集跟踪。
+11:44:21  INFO       │    [ 12]  misc_extensions               各种小型、独立的实用工具和辅助扩展。
+11:44:21  INFO       │    [ 13]  expert_extension              数据库性能分析和诊断工具。
+11:44:21  INFO       │    [ 14]  integrity_check_extension     数据库完整性检查工具。
+11:44:21  INFO       │    [ 15]  resumable_backup_extension    可恢复的数据库备份工具。
+11:44:21  INFO       │    [ 16]  database_recovery_extension   损坏数据库的修复和恢复工具。
+11:44:21  INFO       │    [ 17]  jni_extension                 SQLite的Java Native Interface绑定。
+11:44:21  INFO       │    [ 18]  qrf_extension                 QRF相关的扩展功能。
+11:44:21  INFO       │
+11:44:21  INFO       │  area 表记录（共 18 条）：
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 1
+11:44:21  INFO       │  name      : core_engine
+11:44:21  INFO       │  path      : .
+11:44:21  INFO       │  rationale : 包含SQLite数据库引擎的核心源代码，是整个项目的基石，负责数据库的存储、查询和管理。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 5
+11:44:21  INFO       │  name      : assets
+11:44:21  INFO       │  path      : art/
+11:44:21  INFO       │  rationale : 包含项目相关的图像、图标等视觉资源，用于品牌展示或界面元素。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 2
+11:44:21  INFO       │  name      : build_autoconf
+11:44:21  INFO       │  path      : autoconf/
+11:44:21  INFO       │  rationale : 负责基于Autoconf工具链的Unix-like系统构建配置和脚本，用于生成Makefile等构建文件。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 3
+11:44:21  INFO       │  name      : build_autosetup
+11:44:21  INFO       │  path      : autosetup/
+11:44:21  INFO       │  rationale : 提供一个自定义的、基于Tcl的构建配置和脚本系统，作为Autoconf的替代或补充。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 6
+11:44:21  INFO       │  name      : contributions
+11:44:21  INFO       │  path      : contrib/
+11:44:21  INFO       │  rationale : 存放社区贡献或非核心的辅助脚本和工具，不直接属于核心引擎或官方扩展。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 4
+11:44:21  INFO       │  name      : documentation
+11:44:21  INFO       │  path      : doc/
+11:44:21  INFO       │  rationale : 存放SQLite的各种文档、指南和设计说明，帮助用户和开发者理解项目。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 13
+11:44:21  INFO       │  name      : expert_extension
+11:44:21  INFO       │  path      : ext/expert/
+11:44:21  INFO       │  rationale : 提供数据库性能分析和诊断的专家工具，帮助优化数据库操作。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 7
+11:44:21  INFO       │  name      : fts3_extension
+11:44:21  INFO       │  path      : ext/fts3/
+11:44:21  INFO       │  rationale : 实现SQLite的第三版全文搜索功能，是一个独立的数据库扩展，用于文本内容的快速检索。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 8
+11:44:21  INFO       │  name      : fts5_extension
+11:44:21  INFO       │  path      : ext/fts5/
+11:44:21  INFO       │  rationale : 实现SQLite的第五版全文搜索功能，是FTS3的升级和替代，提供更高级的搜索特性。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 9
+11:44:21  INFO       │  name      : icu_extension
+11:44:21  INFO       │  path      : ext/icu/
+11:44:21  INFO       │  rationale : 提供与ICU（International Components for Unicode）库的集成，增强Unicode文本处理能力。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 14
+11:44:21  INFO       │  name      : integrity_check_extension
+11:44:21  INFO       │  path      : ext/intck/
+11:44:21  INFO       │  rationale : 专注于数据库完整性检查和验证的工具，确保数据的一致性和正确性。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 17
+11:44:21  INFO       │  name      : jni_extension
+11:44:21  INFO       │  path      : ext/jni/
+11:44:21  INFO       │  rationale : 提供Java Native Interface (JNI) 绑定，允许Java应用程序调用SQLite功能。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 12
+11:44:21  INFO       │  name      : misc_extensions
+11:44:21  INFO       │  path      : ext/misc/
+11:44:21  INFO       │  rationale : 包含各种小型、独立的实用工具和辅助扩展，功能多样，不属于其他特定扩展类别。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 18
+11:44:21  INFO       │  name      : qrf_extension
+11:44:21  INFO       │  path      : ext/qrf/
+11:44:21  INFO       │  rationale : 包含QRF相关的扩展功能，是一个独立的模块，提供特定的数据处理能力。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 15
+11:44:21  INFO       │  name      : resumable_backup_extension
+11:44:21  INFO       │  path      : ext/rbu/
+11:44:21  INFO       │  rationale : 提供可恢复的数据库备份和恢复功能，增强数据可靠性。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 16
+11:44:21  INFO       │  name      : database_recovery_extension
+11:44:21  INFO       │  path      : ext/recover/
+11:44:21  INFO       │  rationale : 包含用于修复和恢复损坏数据库的工具，处理数据损坏情况。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 10
+11:44:21  INFO       │  name      : rtree_extension
+11:44:21  INFO       │  path      : ext/rtree/
+11:44:21  INFO       │  rationale : 实现R-树空间索引算法，用于高效的空间数据查询和管理。
+11:44:21  INFO       │  ───────────────────────────────────────────────
+11:44:21  INFO       │  id        : 11
+11:44:21  INFO       │  name      : session_extension
+11:44:21  INFO       │  path      : ext/session/
+11:44:21  INFO       │  rationale : 提供数据库会话管理和变更集（changeset）跟踪功能，用于数据同步和审计。
+11:44:21  INFO       └────────────────────────────────────────────────────
+11:44:21  INFO     ◀ 用例结束  [sqlite]
+11:44:21  INFO     
+11:44:21  INFO     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11:44:21  INFO     ▶ 用例开始  [tmux]
+11:44:21  INFO     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11:44:21  INFO     
+11:44:21  INFO       仓库名称  : tmux
+11:44:21  INFO       仓库路径  : C:\Users\caoye04\Desktop\repo_4_codemap\tmux
+11:44:21  INFO       数据库    : C:\Users\caoye04\AppData\Local\Temp\pytest-of-caoye04\pytest-11\test_observe_analyze_repo_area4\tmux.db
+11:44:21  INFO     
+11:44:21  INFO       [1/3] init_repo("tmux")
+11:44:21  INFO             → 返回 repo_id = 1
+11:44:21  INFO     
+11:44:21  INFO       [2/3] analyze_repo_language(repo_id=1)
+11:44:21  INFO             → 主语言 = C，语言种数 = 5，总字节数 = 2,658,330
+11:44:21  INFO     
+11:44:21  INFO       [3/3] analyze_repo_area(repo_id=1)
+11:44:45  INFO             → 共 7 个 area：core_runtime, platform_compatibility, regression_testing, fuzz_testing, dev_tools, branding_assets, presentations
+11:44:45  INFO     
+11:44:45  INFO       ┌── Area 层级快照  [tmux  /  analyze_repo_area 完成后]
+11:44:45  INFO       │  repo.arealist（7 项）：
+11:44:45  INFO       │    [  1]  core_runtime                  包含 tmux 核心运行时组件、会话/窗口管理及基础系统交互。
+11:44:45  INFO       │    [  2]  platform_compatibility        提供跨平台兼容性函数和操作系统特定实现。
+11:44:45  INFO       │    [  3]  regression_testing            包含回归测试脚本和配置文件，验证功能正确性。
+11:44:45  INFO       │    [  4]  fuzz_testing                  包含模糊测试代码，用于发现潜在漏洞。
+11:44:45  INFO       │    [  5]  dev_tools                     提供辅助开发、调试和演示的实用工具。
+11:44:45  INFO       │    [  6]  branding_assets               包含 tmux 项目的品牌标志和图标。
+11:44:45  INFO       │    [  7]  presentations                 包含 tmux 相关的公开演示文稿。
+11:44:45  INFO       │
+11:44:45  INFO       │  area 表记录（共 7 条）：
+11:44:45  INFO       │  ───────────────────────────────────────────────
+11:44:45  INFO       │  id        : 1
+11:44:45  INFO       │  name      : core_runtime
+11:44:45  INFO       │  path      : .
+11:44:45  INFO       │  rationale : 包含 tmux 应用程序的核心运行时组件，如服务器、客户端、会话、窗口管理以及基础系统交互和通用工具函数。
+11:44:45  INFO       │  ───────────────────────────────────────────────
+11:44:45  INFO       │  id        : 2
+11:44:45  INFO       │  name      : platform_compatibility
+11:44:45  INFO       │  path      : compat/
+11:44:45  INFO       │  rationale : 包含用于提供跨平台兼容性的函数实现，以及针对不同操作系统（如 Linux, macOS, OpenBSD 等）的特定代码。
+11:44:45  INFO       │  ───────────────────────────────────────────────
+11:44:45  INFO       │  id        : 4
+11:44:45  INFO       │  name      : fuzz_testing
+11:44:45  INFO       │  path      : fuzz/
+11:44:45  INFO       │  rationale : 包含用于模糊测试的源代码和配置文件，旨在发现潜在的安全漏洞和健壮性问题。
+11:44:45  INFO       │  ───────────────────────────────────────────────
+11:44:45  INFO       │  id        : 6
+11:44:45  INFO       │  name      : branding_assets
+11:44:45  INFO       │  path      : logo/
+11:44:45  INFO       │  rationale : 包含 tmux 项目的品牌标志、图标和其他视觉资产。
+11:44:45  INFO       │  ───────────────────────────────────────────────
+11:44:45  INFO       │  id        : 7
+11:44:45  INFO       │  name      : presentations
+11:44:45  INFO       │  path      : presentations/
+11:44:45  INFO       │  rationale : 包含与 tmux 相关的公开演示文稿和幻灯片。
+11:44:45  INFO       │  ───────────────────────────────────────────────
+11:44:45  INFO       │  id        : 3
+11:44:45  INFO       │  name      : regression_testing
+11:44:45  INFO       │  path      : regress/
+11:44:45  INFO       │  rationale : 包含大量的回归测试脚本和配置文件，用于验证 tmux 在各种场景下的功能正确性。
+11:44:45  INFO       │  ───────────────────────────────────────────────
+11:44:45  INFO       │  id        : 5
+11:44:45  INFO       │  name      : dev_tools
+11:44:45  INFO       │  path      : tools/
+11:44:45  INFO       │  rationale : 包含各种辅助开发、调试、演示和分析的实用脚本和文件。
+11:44:45  INFO       └────────────────────────────────────────────────────
+11:44:45  INFO     ◀ 用例结束  [tmux]
+11:44:45  INFO     
+11:44:45  INFO     ╔════════════════════════════════════════════════════════════════════════════════╗
+11:44:45  INFO     ║  五库 analyze_repo_area  汇总对比                                               ║
+11:44:45  INFO     ╠════════════════════════════════════════════════════════════════════════════════╣
+11:44:45  INFO     ║  仓库名             主语言       area数  状态        area 名称列表（前5项）     ║
+11:44:45  INFO     ╠────────────────────────────────────────────────────────────────────────────────╣
+11:44:45  INFO     ║  libuv           C             7  ✓ 完成        project_root_metadata, core_a...║
+11:44:45  INFO     ║  linenoise       C             1  ✓ 完成        linenoise_root                  ║
+11:44:45  INFO     ║  minizip-ng      C             5  ✓ 完成        build_system, compatibility_l...║
+11:44:45  INFO     ║  sqlite          C            18  ✓ 完成        core_engine, build_autoconf, ...║
+11:44:45  INFO     ║  tmux            C             7  ✓ 完成        core_runtime, platform_compat...║
+11:44:45  INFO     ╚════════════════════════════════════════════════════════════════════════════════╝
+11:44:45  INFO     
+11:44:45  INFO     五库 analyze_repo_area 集成观测测试  结束
+11:44:45  INFO     ======================================================================

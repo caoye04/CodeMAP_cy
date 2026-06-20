@@ -6,73 +6,91 @@
   "llm_raw": {
     "areas": [
       {
-        "name": "library_core",
+        "name": "core_zip_library",
         "path": ".",
-        "rationale": "包含Minizip-ng库的所有核心功能实现，包括ZIP文件操作、流管理、加密算法和操作系统抽象层。",
-        "brief": "Minizip-ng库的核心实现，提供ZIP文件读写、压缩和加密功能。"
+        "rationale": "此区域包含Minizip-ng库的核心ZIP文件操作逻辑，如ZIP归档的创建、读取和写入。它是库功能的基础。",
+        "brief": "核心ZIP文件操作库。"
       },
       {
-        "name": "cli_applications",
+        "name": "stream_compression",
         "path": ".",
-        "rationale": "包含基于Minizip-ng库构建的命令行工具，如minigzip和minizip，用于演示和基本文件操作。",
-        "brief": "基于Minizip-ng库的命令行工具和示例应用。"
+        "rationale": "此区域负责处理数据流和各种压缩/解压缩算法的集成，例如Zlib、Bzip2、LZMA和Zstd。它提供了数据处理的灵活性和扩展性。",
+        "brief": "数据流和多种压缩/解压缩算法管理。"
       },
       {
-        "name": "legacy_api_compat",
-        "path": "compat",
-        "rationale": "提供与原始Minizip库API兼容的接口和实现，方便现有项目迁移或使用旧版API。",
-        "brief": "兼容旧版Minizip库API的适配层。"
+        "name": "cryptography",
+        "path": ".",
+        "rationale": "此区域封装了ZIP文件的加密和解密功能，支持多种加密标准和平台特定的实现。它确保了数据传输和存储的安全性。",
+        "brief": "ZIP文件加密和解密功能。"
+      },
+      {
+        "name": "os_abstraction",
+        "path": ".",
+        "rationale": "此区域提供了操作系统相关的抽象层，封装了文件I/O、路径处理等底层操作，以实现库的跨平台兼容性。",
+        "brief": "跨平台操作系统抽象层。"
+      },
+      {
+        "name": "utilities_examples",
+        "path": ".",
+        "rationale": "此区域包含使用Minizip-ng库的示例程序或小型工具（如minigzip, minizip），用于演示库的基本用法和功能。",
+        "brief": "库的使用示例和小型工具。"
+      },
+      {
+        "name": "compatibility_layer",
+        "path": "compat/",
+        "rationale": "此区域提供了与旧版Minizip API的兼容层，方便现有项目迁移或在特定场景下使用旧接口。",
+        "brief": "与旧版Minizip API的兼容层。"
       },
       {
         "name": "build_system",
-        "path": "cmake",
-        "rationale": "包含用于配置和构建项目的CMake脚本，管理依赖和编译选项。",
-        "brief": "项目的构建系统配置和辅助脚本。"
+        "path": "cmake/",
+        "rationale": "此区域包含用于编译和构建项目的CMake脚本和配置，管理项目依赖和生成构建文件。",
+        "brief": "项目的编译和构建配置。"
       },
       {
         "name": "documentation",
-        "path": "doc",
-        "rationale": "包含所有用户和开发者文档，如API说明、错误码、压缩方法等，帮助理解和使用库。",
-        "brief": "Minizip-ng库的官方文档和技术说明。"
+        "path": "doc/",
+        "rationale": "此区域存放项目的所有文档，包括API说明、使用指南和技术细节，帮助用户理解和使用库。",
+        "brief": "项目官方文档和技术说明。"
       },
       {
         "name": "testing",
-        "path": "test",
-        "rationale": "包含单元测试、集成测试和模糊测试等，用于验证库功能的正确性、稳定性和安全性。",
-        "brief": "项目的测试套件和测试数据，确保代码质量。"
+        "path": "test/",
+        "rationale": "此区域包含所有单元测试、集成测试和模糊测试代码及数据，用于验证库的正确性、稳定性和安全性。",
+        "brief": "库的测试代码和测试数据。"
       }
     ]
   },
   "areas": [
     {
-      "name": "library_core",
+      "name": "core_zip_library",
       "path": ".",
-      "rationale": "包含Minizip-ng库的所有核心功能实现，包括ZIP文件操作、流管理、加密算法和操作系统抽象层。",
-      "brief": "Minizip-ng库的核心实现，提供ZIP文件读写、压缩和加密功能。"
+      "rationale": "此区域包含Minizip-ng库的核心ZIP文件操作逻辑，如ZIP归档的创建、读取和写入。它是库功能的基础。",
+      "brief": "核心ZIP文件操作库。"
     },
     {
-      "name": "legacy_api_compat",
-      "path": "compat",
-      "rationale": "提供与原始Minizip库API兼容的接口和实现，方便现有项目迁移或使用旧版API。",
-      "brief": "兼容旧版Minizip库API的适配层。"
+      "name": "compatibility_layer",
+      "path": "compat/",
+      "rationale": "此区域提供了与旧版Minizip API的兼容层，方便现有项目迁移或在特定场景下使用旧接口。",
+      "brief": "与旧版Minizip API的兼容层。"
     },
     {
       "name": "build_system",
-      "path": "cmake",
-      "rationale": "包含用于配置和构建项目的CMake脚本，管理依赖和编译选项。",
-      "brief": "项目的构建系统配置和辅助脚本。"
+      "path": "cmake/",
+      "rationale": "此区域包含用于编译和构建项目的CMake脚本和配置，管理项目依赖和生成构建文件。",
+      "brief": "项目的编译和构建配置。"
     },
     {
       "name": "documentation",
-      "path": "doc",
-      "rationale": "包含所有用户和开发者文档，如API说明、错误码、压缩方法等，帮助理解和使用库。",
-      "brief": "Minizip-ng库的官方文档和技术说明。"
+      "path": "doc/",
+      "rationale": "此区域存放项目的所有文档，包括API说明、使用指南和技术细节，帮助用户理解和使用库。",
+      "brief": "项目官方文档和技术说明。"
     },
     {
       "name": "testing",
-      "path": "test",
-      "rationale": "包含单元测试、集成测试和模糊测试等，用于验证库功能的正确性、稳定性和安全性。",
-      "brief": "项目的测试套件和测试数据，确保代码质量。"
+      "path": "test/",
+      "rationale": "此区域包含所有单元测试、集成测试和模糊测试代码及数据，用于验证库的正确性、稳定性和安全性。",
+      "brief": "库的测试代码和测试数据。"
     }
   ]
 }

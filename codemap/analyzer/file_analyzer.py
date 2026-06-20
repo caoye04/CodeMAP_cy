@@ -1,23 +1,29 @@
 """
 analyzer/file_analyzer.py
-CodeMAP File 层分析器
+CodeMAP 文件层分析器
 
 实现：
-  - analyze_file_language : 根据文件扩展名确定编程语言，批量写入 file.language
-  - analyze_file_func     : 提取文件中所有函数/方法，写入 func 表并更新 file.funclist
+  - analyze_file_language : 检测每个文件的编程语言，写入 file:language
+  - analyze_file_func     : 解析每个文件中的所有函数，写入：
+                              file:funclist / func:name / func:place / func:io
 
-函数提取策略（按优先级）：
-  Python       → Python ast 模块（精确，覆盖嵌套函数/方法）
-  C/C++/其他   → Universal Ctags（若可用）+ 源码签名解析补充 io
-  兜底          → LLM 全文提取（文件 ≤ _MAX_LINES_LLM 行时）
+语言策略
+--------
+  Python      → ast 模块（精确，零依赖）
+  C / C++     → tree-sitter 专用提取器（精确签名和类型信息）
+  其他已支持   → tree-sitter-languages 通用提取器（130+ 语言）
+  兜底         → ctags（只拿名称和行号，io 留空）
+  真正无解      → language=Unknown，跳过函数提取
 """
 
 import ast
 import json as _json
 import os
 import re
+import shutil
 import subprocess
 import sys
+from collections import Counter
 from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -26,9 +32,21 @@ from db.dao import RepoDB, FileDB, FuncDB
 from config import DB_PATH, DATA_DIR
 
 
-# ══════════════════════════════════════════════════════════════════
-#  常量与映射表
-# ══════════════════════════════════════════════════════════════════
+# ==================================================================
+# 0. tree-sitter 可用性检测（延迟导入，避免强依赖）
+# ==================================================================
+
+try:
+    from tree_sitter_languages import get_parser as _ts_get_parser
+    _ts_get_parser('c')
+    _TREE_SITTER_OK = True
+except ImportError:
+    _TREE_SITTER_OK = False
+
+
+# ==================================================================
+# 1. 语言映射常量
+# ==================================================================
 
 _EXT_TO_LANG: dict[str, str] = {
     # C / C++
@@ -39,7 +57,7 @@ _EXT_TO_LANG: dict[str, str] = {
     '.py': 'Python',
     # Java
     '.java': 'Java',
-    # JavaScript / TypeScript
+    # JS / TS
     '.js': 'JavaScript', '.jsx': 'JavaScript',
     '.ts': 'TypeScript', '.tsx': 'TypeScript',
     # Go
@@ -48,29 +66,21 @@ _EXT_TO_LANG: dict[str, str] = {
     '.rs': 'Rust',
     # Shell
     '.sh': 'Shell', '.bash': 'Shell', '.zsh': 'Shell',
-    # CMake
+    # 构建脚本
     '.cmake': 'CMake',
-    # Ruby
+    # 其他
     '.rb': 'Ruby',
-    # Swift
     '.swift': 'Swift',
-    # Kotlin
     '.kt': 'Kotlin', '.kts': 'Kotlin',
-    # Scala
     '.scala': 'Scala',
-    # Haskell
     '.hs': 'Haskell',
-    # Assembly
     '.asm': 'Assembly', '.s': 'Assembly',
-    # Lua
     '.lua': 'Lua',
-    # Perl
     '.pl': 'Perl', '.pm': 'Perl',
-    # Fortran
     '.f': 'Fortran', '.f90': 'Fortran', '.f95': 'Fortran',
-    # MATLAB / Objective-C
+    '.r': 'R',
     '.m': 'MATLAB', '.mm': 'Objective-C',
-    # 配置 / 文档类
+    # 文档 / 配置
     '.md': 'Markdown', '.rst': 'reStructuredText',
     '.yaml': 'YAML', '.yml': 'YAML',
     '.json': 'JSON', '.xml': 'XML',
@@ -79,188 +89,150 @@ _EXT_TO_LANG: dict[str, str] = {
     '.toml': 'TOML', '.ini': 'INI', '.cfg': 'INI',
 }
 
-# 通常不含函数定义的语言 → 跳过函数提取
-_NO_FUNC_LANGS: frozenset[str] = frozenset({
-    'Markdown', 'reStructuredText', 'YAML', 'JSON', 'XML',
-    'HTML', 'CSS', 'SQL', 'TOML', 'INI',
-    'CMake', 'Makefile', 'Assembly', 'Unknown',
-})
-
-# ctags 语言名映射（Universal Ctags --languages 参数）
-_CTAGS_LANG_MAP: dict[str, str] = {
-    'C': 'C', 'C++': 'C++', 'Objective-C': 'ObjectiveC',
-    'Python': 'Python', 'Java': 'Java',
-    'JavaScript': 'JavaScript', 'TypeScript': 'TypeScript',
-    'Go': 'Go', 'Rust': 'Rust', 'Ruby': 'Ruby',
-    'Swift': 'Swift', 'Kotlin': 'Kotlin',
-    'Scala': 'Scala', 'Lua': 'Lua', 'Shell': 'Sh',
+_SPECIAL_NAMES: dict[str, str] = {
+    'makefile':        'Makefile',
+    'gnumakefile':     'Makefile',
+    'cmakelists.txt':  'CMake',
+    'dockerfile':      'Dockerfile',
+    'gemfile':         'Ruby',
+    'rakefile':        'Ruby',
+    'vagrantfile':     'Ruby',
+    'podfile':         'Ruby',
+    'brewfile':        'Ruby',
 }
 
-# ctags kind 字符集合 → 视为"函数"
-_FUNC_KINDS: frozenset[str] = frozenset({
-    'f', 'function',
-    'm', 'method',
-    'p', 'prototype',
-    's', 'subroutine',
-    'procedure',
+# 显示名 → tree-sitter grammar 名
+_LANG_TO_TS: dict[str, str] = {
+    'C':           'c',
+    'C++':         'cpp',
+    'Python':      'python',
+    'Java':        'java',
+    'JavaScript':  'javascript',
+    'TypeScript':  'typescript',
+    'Go':          'go',
+    'Rust':        'rust',
+    'Ruby':        'ruby',
+    'Swift':       'swift',
+    'Kotlin':      'kotlin',
+    'Lua':         'lua',
+    'Shell':       'bash',
+    'Haskell':     'haskell',
+    'Scala':       'scala',
+}
+
+# tree-sitter grammar 名 → 函数定义节点类型列表
+_TS_FUNC_TYPES: dict[str, list[str]] = {
+    'c':           ['function_definition'],
+    'cpp':         ['function_definition'],
+    'python':      ['function_definition'],      # ast 优先；此为备用
+    'java':        ['method_declaration', 'constructor_declaration'],
+    'javascript':  ['function_declaration', 'method_definition', 'function_expression'],
+    'typescript':  ['function_declaration', 'method_definition', 'function_expression'],
+    'go':          ['function_declaration', 'method_declaration'],
+    'rust':        ['function_item'],
+    'ruby':        ['method', 'singleton_method'],
+    'swift':       ['function_declaration'],
+    'kotlin':      ['function_declaration'],
+    'lua':         ['function_declaration', 'local_function'],
+    'bash':        ['function_definition'],
+    'haskell':     [],                            # 语法较特殊，暂不提取
+    'scala':       ['function_declaration', 'function_definition'],
+}
+
+# 不提取函数的语言（文档、配置、数据类）
+_NO_FUNC_LANGS: frozenset[str] = frozenset({
+    'Markdown', 'reStructuredText', 'YAML', 'JSON', 'XML',
+    'HTML', 'CSS', 'SQL', 'TOML', 'INI', 'CMake', 'Makefile',
+    'Dockerfile', 'Assembly', 'MATLAB', 'R', 'Fortran', 'Unknown',
 })
 
-_MAX_LINES_LLM   = 3000       # 超过此行数时截断发给 LLM
-_MAX_BYTES_READ  = 1_000_000  # 单文件最大读取字节（1 MB）
-
-# ctags 可用性缓存（None = 未检测）
-_ctags_ok: bool | None = None
+# 单文件解析大小上限（超出则跳过函数提取）
+_MAX_FILE_BYTES = 5 * 1024 * 1024   # 5 MB
 
 
-# ══════════════════════════════════════════════════════════════════
-#  语言检测
-# ══════════════════════════════════════════════════════════════════
+# ==================================================================
+# 2. 语言检测
+# ==================================================================
 
-def _detect_language(file_name: str) -> str:
-    """根据文件名/扩展名推断编程语言，无法识别返回 'Unknown'。"""
-    _, ext = os.path.splitext(file_name)
+def _read_shebang(abs_path: str) -> Optional[str]:
+    """读取文件首行 shebang，返回对应语言名或 None。"""
+    try:
+        with open(abs_path, 'rb') as f:
+            first = f.read(128)
+        line = first.split(b'\n', 1)[0].decode('utf-8', errors='ignore')
+        if not line.startswith('#!'):
+            return None
+        lower = line.lower()
+        if 'python'             in lower: return 'Python'
+        if 'ruby'               in lower: return 'Ruby'
+        if 'node'               in lower: return 'JavaScript'
+        if 'perl'               in lower: return 'Perl'
+        if 'lua'                in lower: return 'Lua'
+        if '/bash' in lower or '/sh' in lower or '/zsh' in lower:
+            return 'Shell'
+    except OSError:
+        pass
+    return None
+
+
+def _detect_language(filename: str, abs_path: str) -> str:
+    """
+    检测文件编程语言。
+
+    优先级：
+      1. 特殊文件名（Makefile / CMakeLists.txt 等）
+      2. 扩展名映射
+      3. shebang（#!）行
+      4. 返回 'Unknown'
+    """
+    lower = filename.lower()
+    if lower in _SPECIAL_NAMES:
+        return _SPECIAL_NAMES[lower]
+
+    _, ext = os.path.splitext(filename)
     lang = _EXT_TO_LANG.get(ext.lower())
-    if lang is None:
-        lower = file_name.lower()
-        if lower in ('makefile', 'gnumakefile'):
-            lang = 'Makefile'
-        elif file_name == 'CMakeLists.txt':
-            lang = 'CMake'
-    return lang or 'Unknown'
+    if lang:
+        return lang
+
+    shebang = _read_shebang(abs_path)
+    if shebang:
+        return shebang
+
+    return 'Unknown'
 
 
-# ══════════════════════════════════════════════════════════════════
-#  analyze_file_language
-# ══════════════════════════════════════════════════════════════════
+# ==================================================================
+# 3. 文件内容读取
+# ==================================================================
 
-def analyze_file_language(
-    repo_id: int,
-    db_path: str | None = None,
-    file_id: int | None = None,
-) -> dict[int, str]:
+def _read_source(abs_path: str) -> Optional[str]:
     """
-    根据文件扩展名确定编程语言并持久化到 file.language。
-
-    Parameters
-    ----------
-    repo_id : int
-        目标仓库 id（由 init_repo 返回）
-    db_path : str | None
-        SQLite 路径；不传则使用 config.DB_PATH
-    file_id : int | None
-        若指定，则只处理该文件；否则处理 repo 下所有文件
-
-    Returns
-    -------
-    dict[int, str]
-        {file_id: language} 映射，language 如 "C" / "Python" / "Unknown"
-
-    Raises
-    ------
-    ValueError
-        repo_id 或 file_id 在数据库中不存在
-    """
-    _db = db_path or DB_PATH
-
-    # ① 校验仓库
-    repo = RepoDB.get_by_id(repo_id, db_path=_db)
-    if repo is None:
-        raise ValueError(
-            f"[analyze_file_language] repo_id={repo_id} 不存在于数据库。"
-        )
-
-    # ② 确定目标文件列表
-    if file_id is not None:
-        file_rec = FileDB.get_by_id(file_id, db_path=_db)
-        if file_rec is None:
-            raise ValueError(
-                f"[analyze_file_language] file_id={file_id} 不存在于数据库。"
-            )
-        files = [file_rec]
-    else:
-        files = FileDB.list_by_repo(repo_id, db_path=_db)
-
-    if not files:
-        print(
-            f"[analyze_file_language] ⚠ repo_id={repo_id} 暂无文件记录，"
-            "请先执行 analyze_area_file。"
-        )
-        return {}
-
-    # ③ 批量检测并写库
-    result: dict[int, str]      = {}
-    lang_counter: dict[str, int] = {}
-
-    for f in files:
-        lang = _detect_language(f['name'])
-        FileDB.update(f['id'], db_path=_db, language=lang)
-        result[f['id']] = lang
-        lang_counter[lang] = lang_counter.get(lang, 0) + 1
-
-    # ④ 打印摘要
-    total = len(files)
-    print(f"[analyze_file_language] ✓ 处理 {total} 个文件，语言分布：")
-    for lang, cnt in sorted(lang_counter.items(), key=lambda x: -x[1]):
-        bar = '█' * min(cnt, 40)
-        print(f"    {lang:22s}: {cnt:4d}  {bar}")
-
-    return result
-
-
-# ══════════════════════════════════════════════════════════════════
-#  文件读取工具
-# ══════════════════════════════════════════════════════════════════
-
-def _read_file_safe(file_path: str) -> str | None:
-    """
-    安全读取文本文件。
-    - 超过 _MAX_BYTES_READ 返回 None
-    - 含大量 NUL 字节（二进制）返回 None
-    - 依次尝试 utf-8 / latin-1 编码
+    读取源文件文本，自动处理编码（UTF-8 → latin-1 兜底）。
+    超过大小上限返回 None。
     """
     try:
-        if os.path.getsize(file_path) > _MAX_BYTES_READ:
+        if os.path.getsize(abs_path) > _MAX_FILE_BYTES:
             return None
     except OSError:
         return None
 
-    for enc in ('utf-8', 'latin-1'):
+    for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'gbk'):
         try:
-            with open(file_path, 'r', encoding=enc, errors='replace') as fh:
-                content = fh.read()
-            if content.count('\x00') > 20:   # 粗判二进制文件
-                return None
-            return content
+            with open(abs_path, 'r', encoding=enc, errors='strict') as f:
+                return f.read()
+        except (UnicodeDecodeError, ValueError):
+            continue
         except OSError:
             return None
     return None
 
 
-def _add_line_numbers(content: str) -> tuple[str, int]:
-    """
-    给内容每行加行号前缀，超过 _MAX_LINES_LLM 时截断并追加提示。
+# ==================================================================
+# 4. Python 函数提取（ast 模块）
+# ==================================================================
 
-    Returns
-    -------
-    (numbered_str, total_line_count)
-    """
-    lines = content.splitlines()
-    total = len(lines)
-    selected = lines[:_MAX_LINES_LLM]
-    numbered = '\n'.join(f"{i + 1:5d} | {line}" for i, line in enumerate(selected))
-    if total > _MAX_LINES_LLM:
-        numbered += (
-            f'\n... (文件共 {total} 行，已截断，仅展示前 {_MAX_LINES_LLM} 行)'
-        )
-    return numbered, total
-
-
-# ══════════════════════════════════════════════════════════════════
-#  策略 1：Python ast 提取
-# ══════════════════════════════════════════════════════════════════
-
-def _ann_str(node) -> str:
-    """安全地将 ast 注解节点转为字符串，失败时返回空串。"""
+def _ast_unparse(node) -> str:
+    """安全地反序列化 AST 注解节点；失败返回空字符串。"""
     if node is None:
         return ''
     try:
@@ -269,638 +241,648 @@ def _ann_str(node) -> str:
         return ''
 
 
-def _build_py_signature(node: 'ast.FunctionDef | ast.AsyncFunctionDef') -> str:
-    """从 ast 函数节点构建完整签名字符串。"""
-    ao = node.args
-    parts: list[str] = []
-    defaults_offset = len(ao.args) - len(ao.defaults)
+def _extract_python_funcs(source: str, rel_path: str) -> list[dict]:
+    """
+    用 ast 模块解析 Python 源文件，提取所有函数（含 async def、类方法、嵌套函数）。
 
-    for i, arg in enumerate(ao.args):
-        ann = f': {_ann_str(arg.annotation)}' if arg.annotation else ''
-        di  = i - defaults_offset
-        try:
-            default = f' = {ast.unparse(ao.defaults[di])}' if di >= 0 else ''
-        except Exception:
-            default = ''
-        parts.append(f"{arg.arg}{ann}{default}")
+    返回列表，每项：
+    {
+        name, signature, start_line, end_line,
+        return_type, params[{name, type, desc}], file_path
+    }
+    """
+    try:
+        tree = ast.parse(source, filename=rel_path, type_comments=False)
+    except SyntaxError:
+        return []
 
-    if ao.vararg:
-        ann = f': {_ann_str(ao.vararg.annotation)}' if ao.vararg.annotation else ''
-        parts.append(f"*{ao.vararg.arg}{ann}")
-    elif ao.kwonlyargs:
-        parts.append('*')
+    funcs: list[dict] = []
 
-    for i, arg in enumerate(ao.kwonlyargs):
-        ann = f': {_ann_str(arg.annotation)}' if arg.annotation else ''
-        kd  = ao.kw_defaults[i]
-        try:
-            default = f' = {ast.unparse(kd)}' if kd is not None else ''
-        except Exception:
-            default = ''
-        parts.append(f"{arg.arg}{ann}{default}")
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
 
-    if ao.kwarg:
-        ann = f': {_ann_str(ao.kwarg.annotation)}' if ao.kwarg.annotation else ''
-        parts.append(f"**{ao.kwarg.arg}{ann}")
+        func_name  = node.name
+        start_line = node.lineno
+        end_line   = getattr(node, 'end_lineno', node.lineno)
 
-    ret_ann = f' -> {_ann_str(node.returns)}' if node.returns else ''
-    prefix  = 'async def ' if isinstance(node, ast.AsyncFunctionDef) else 'def '
-    return f"{prefix}{node.name}({', '.join(parts)}){ret_ann}"
+        params: list[dict] = []
+        args = node.args
+
+        # 普通位置参数
+        for arg in args.args:
+            params.append({
+                'name': arg.arg,
+                'type': _ast_unparse(arg.annotation),
+                'desc': '',
+            })
+
+        # *args
+        if args.vararg:
+            params.append({
+                'name': f'*{args.vararg.arg}',
+                'type': _ast_unparse(args.vararg.annotation),
+                'desc': '',
+            })
+
+        # keyword-only 参数
+        for arg in args.kwonlyargs:
+            params.append({
+                'name': arg.arg,
+                'type': _ast_unparse(arg.annotation),
+                'desc': '',
+            })
+
+        # **kwargs
+        if args.kwarg:
+            params.append({
+                'name': f'**{args.kwarg.arg}',
+                'type': _ast_unparse(args.kwarg.annotation),
+                'desc': '',
+            })
+
+        return_type = _ast_unparse(node.returns)
+
+        # 构建签名字符串
+        param_strs = []
+        for p in params:
+            param_strs.append(
+                f"{p['name']}: {p['type']}" if p['type'] else p['name']
+            )
+        prefix    = 'async def ' if isinstance(node, ast.AsyncFunctionDef) else 'def '
+        ret_hint  = f' -> {return_type}' if return_type else ''
+        signature = f"{prefix}{func_name}({', '.join(param_strs)}){ret_hint}"
+
+        funcs.append({
+            'name':        func_name,
+            'signature':   signature[:600],
+            'start_line':  start_line,
+            'end_line':    end_line,
+            'return_type': return_type,
+            'params':      params,
+            'file_path':   rel_path,
+        })
+
+    return funcs
 
 
-def _build_py_params(node: 'ast.FunctionDef | ast.AsyncFunctionDef') -> list[dict]:
-    """从 ast 函数节点提取参数列表。"""
-    ao     = node.args
+# ==================================================================
+# 5. C/C++ 函数提取（tree-sitter 专用）
+# ==================================================================
+
+def _ts_text(node, src: bytes) -> str:
+    """从 tree-sitter 节点提取对应源码字符串。"""
+    return src[node.start_byte:node.end_byte].decode('utf-8', errors='replace')
+
+
+def _find_all_nodes(root, wanted: set) -> list:
+    """
+    DFS 遍历 tree-sitter 语法树，收集所有类型在 wanted 中的节点。
+    不中止递归——以支持嵌套函数（如 C++ lambda、本地函数）。
+    """
+    result: list = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type in wanted:
+            result.append(node)
+        # 反序入栈以保证左→右顺序
+        for child in reversed(node.children):
+            stack.append(child)
+    return result
+
+
+def _find_func_declarator(node):
+    """
+    在 C/C++ declarator 链中找到 function_declarator 节点。
+    处理层：pointer_declarator / reference_declarator /
+             parenthesized_declarator / abstract_declarator 等。
+    """
+    if node is None:
+        return None
+    if node.type == 'function_declarator':
+        return node
+    wrapping = {
+        'pointer_declarator', 'reference_declarator',
+        'parenthesized_declarator', 'abstract_declarator',
+        'abstract_pointer_declarator', 'abstract_reference_declarator',
+    }
+    if node.type in wrapping:
+        inner = node.child_by_field_name('declarator')
+        if inner:
+            r = _find_func_declarator(inner)
+            if r:
+                return r
+        # 个别 grammar 版本 field 名不同：遍历直接子节点
+        for child in node.children:
+            r = _find_func_declarator(child)
+            if r:
+                return r
+    return None
+
+
+def _extract_decl_name(node, src: bytes) -> str:
+    """
+    从 C/C++ declarator 节点提取函数标识符名称。
+    处理：identifier / qualified_identifier / destructor_name /
+          operator_name / template_function / pointer_declarator 等。
+    """
+    if node is None:
+        return ''
+    t = node.type
+    if t in ('identifier', 'field_identifier'):
+        return _ts_text(node, src)
+    if t in ('qualified_identifier', 'destructor_name',
+             'operator_name', 'template_function', 'template_method'):
+        return _ts_text(node, src)
+    if t in ('pointer_declarator', 'reference_declarator',
+             'abstract_pointer_declarator'):
+        inner = node.child_by_field_name('declarator')
+        if inner:
+            return _extract_decl_name(inner, src)
+    if t == 'parenthesized_declarator':
+        for child in node.children:
+            r = _extract_decl_name(child, src)
+            if r:
+                return r
+    # 深度优先兜底：找第一个 identifier
+    for child in node.children:
+        r = _extract_decl_name(child, src)
+        if r:
+            return r
+    return _ts_text(node, src)
+
+
+def _extract_c_params(params_node, src: bytes) -> list[dict]:
+    """从 C/C++ parameter_list 节点提取参数信息。"""
+    if params_node is None:
+        return []
+
     params: list[dict] = []
+    for child in params_node.children:
+        # 可变参数 ...
+        raw = _ts_text(child, src).strip()
+        if raw == '...':
+            params.append({'name': '...', 'type': 'variadic', 'desc': ''})
+            continue
 
-    for arg in ao.args:
-        params.append({'name': arg.arg, 'type': _ann_str(arg.annotation), 'desc': ''})
-    if ao.vararg:
-        params.append({
-            'name': f'*{ao.vararg.arg}',
-            'type': _ann_str(ao.vararg.annotation),
-            'desc': '',
-        })
-    for arg in ao.kwonlyargs:
-        params.append({'name': arg.arg, 'type': _ann_str(arg.annotation), 'desc': ''})
-    if ao.kwarg:
-        params.append({
-            'name': f'**{ao.kwarg.arg}',
-            'type': _ann_str(ao.kwarg.annotation),
-            'desc': '',
-        })
+        if child.type == 'variadic_parameter':
+            params.append({'name': '...', 'type': 'variadic', 'desc': ''})
+            continue
+
+        if child.type not in ('parameter_declaration',
+                               'optional_parameter_declaration'):
+            continue
+
+        type_node = child.child_by_field_name('type')
+        decl_node = child.child_by_field_name('declarator')
+
+        param_type = _ts_text(type_node, src).strip() if type_node else ''
+        param_name = _extract_decl_name(decl_node, src).strip() if decl_node else ''
+
+        # 跳过 void 单参数声明：`f(void)`
+        if param_type == 'void' and not param_name:
+            continue
+
+        # 类型和名字都为空时，取整段文本作类型
+        if not param_type and not param_name:
+            if raw:
+                params.append({'name': '', 'type': raw, 'desc': ''})
+            continue
+
+        params.append({'name': param_name, 'type': param_type, 'desc': ''})
+
     return params
 
 
-def _extract_funcs_python(file_path: str) -> list[dict]:
+def _extract_c_cpp_funcs(source: str, rel_path: str, lang: str = 'C') -> list[dict]:
     """
-    使用 Python 内置 ast 模块提取函数/方法定义（含嵌套）。
+    用 tree-sitter 解析 C/C++ 源文件，仅提取有函数体的定义（跳过纯声明）。
 
-    Returns
-    -------
-    list[dict]  键: name, signature, start_line, end_line, params, returns
+    C++ 类内成员函数、模板函数、运算符重载均支持。
     """
-    content = _read_file_safe(file_path)
-    if content is None:
+    if not _TREE_SITTER_OK:
         return []
 
+    ts_name = 'cpp' if lang == 'C++' else 'c'
     try:
-        tree = ast.parse(content, filename=os.path.basename(file_path))
-    except SyntaxError as e:
-        print(f"[file_analyzer] Python 语法错误，跳过 AST 提取：{e}")
+        parser    = _ts_get_parser(ts_name)
+        src_bytes = source.encode('utf-8', errors='replace')
+        tree      = parser.parse(src_bytes)
+    except Exception:
+        print(f"[warn] tree-sitter 解析器加载失败（{ts_name}）：{e}")
         return []
 
-    functions: list[dict] = []
+    func_nodes = _find_all_nodes(tree.root_node, {'function_definition'})
+    funcs: list[dict] = []
 
-    class _Visitor(ast.NodeVisitor):
-        def _handle(self, node: 'ast.FunctionDef | ast.AsyncFunctionDef') -> None:
-            end_line = getattr(node, 'end_lineno', node.lineno)
-            functions.append({
-                'name':       node.name,
-                'signature':  _build_py_signature(node),
-                'start_line': node.lineno,
-                'end_line':   end_line,
-                'params':     _build_py_params(node),
-                'returns':    {'type': _ann_str(node.returns), 'desc': ''},
-            })
-            self.generic_visit(node)   # 继续遍历嵌套函数
-
-        def visit_FunctionDef(self, node):
-            self._handle(node)
-
-        def visit_AsyncFunctionDef(self, node):
-            self._handle(node)
-
-    _Visitor().visit(tree)
-    return functions
-
-
-# ══════════════════════════════════════════════════════════════════
-#  策略 2：Universal Ctags 提取
-# ══════════════════════════════════════════════════════════════════
-
-def _check_ctags() -> bool:
-    """检测 ctags 是否可用（结果进程生命周期内缓存）。"""
-    global _ctags_ok
-    if _ctags_ok is not None:
-        return _ctags_ok
-    try:
-        r = subprocess.run(
-            ['ctags', '--version'],
-            capture_output=True, text=True, timeout=5,
-        )
-        _ctags_ok = (r.returncode == 0)
-        if _ctags_ok:
-            flavor = 'Universal Ctags' if 'Universal Ctags' in r.stdout else 'Exuberant/Unknown Ctags'
-            print(f"[file_analyzer] ctags 可用（{flavor}）")
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        _ctags_ok = False
-        print('[file_analyzer] ctags 不可用，将使用 LLM 兜底提取函数。')
-    return _ctags_ok
-
-
-def _parse_ctags_output(stdout: str) -> list[dict]:
-    """
-    解析 Universal Ctags u-ctags 格式输出，提取函数信息。
-
-    字段格式（TAB 分隔）：
-      name  filepath  pattern;"  kind  line:N  end:M  [signature:...]
-    """
-    functions: list[dict] = []
-    seen: set[tuple[str, int]] = set()   # (name, start_line) 去重
-
-    for raw_line in stdout.splitlines():
-        if raw_line.startswith('!'):
-            continue   # ctags 元信息行
-
-        parts = raw_line.split('\t')
-        if len(parts) < 4:
+    for node in func_nodes:
+        # 只提取有函数体的定义
+        body = node.child_by_field_name('body')
+        if body is None:
             continue
 
-        name = parts[0].strip()
+        # 返回类型
+        type_node   = node.child_by_field_name('type')
+        return_type = _ts_text(type_node, src_bytes).strip() if type_node else ''
+
+        # 找 function_declarator
+        declarator = node.child_by_field_name('declarator')
+        func_decl  = _find_func_declarator(declarator)
+        if func_decl is None:
+            continue
+
+        # 提取函数名
+        inner_decl = func_decl.child_by_field_name('declarator')
+        func_name  = _extract_decl_name(inner_decl, src_bytes).strip()
+        if not func_name or func_name in ('(', ''):
+            continue
+
+        # 提取参数
+        params_node = func_decl.child_by_field_name('parameters')
+        params      = _extract_c_params(params_node, src_bytes)
+
+        # 签名：body 之前的所有文本，合并为单行
+        sig_raw  = src_bytes[node.start_byte:body.start_byte].decode('utf-8', errors='replace')
+        signature = re.sub(r'\s+', ' ', sig_raw).strip()
+
+        start_line = node.start_point[0] + 1   # tree-sitter 行号从 0 开始
+        end_line   = node.end_point[0]   + 1
+
+        funcs.append({
+            'name':        func_name,
+            'signature':   signature[:600],
+            'start_line':  start_line,
+            'end_line':    end_line,
+            'return_type': return_type,
+            'params':      params,
+            'file_path':   rel_path,
+        })
+
+    return funcs
+
+
+# ==================================================================
+# 6. 通用 tree-sitter 函数提取（非 C/C++/Python）
+# ==================================================================
+
+def _ts_extract_name_generic(node, src: bytes, ts_lang: str) -> str:
+    """
+    通用策略提取函数名：先尝试 'name' field，再 DFS 找 identifier。
+    """
+    name_node = node.child_by_field_name('name')
+    if name_node:
+        return _ts_text(name_node, src).strip()
+
+    # bash function_definition：name 在 word 子节点
+    if ts_lang == 'bash':
+        for child in node.children:
+            if child.type == 'word':
+                return _ts_text(child, src).strip()
+
+    # DFS 找第一个 identifier（深度限 4 层）
+    def _dfs(n, depth=0) -> str:
+        if depth > 4:
+            return ''
+        if n.type in ('identifier', 'type_identifier', 'property_identifier',
+                       'simple_identifier'):
+            return _ts_text(n, src).strip()
+        for ch in n.children:
+            r = _dfs(ch, depth + 1)
+            if r:
+                return r
+        return ''
+
+    return _dfs(node)
+
+
+def _ts_extract_params_generic(node, src: bytes) -> list[dict]:
+    """
+    通用策略提取函数参数：查找 parameters / formal_parameters /
+    parameter_list 子节点，遍历其中的参数条目。
+    """
+    param_parent_names = (
+        'parameters', 'formal_parameters', 'parameter_list',
+        'params', 'lambda_parameters',
+    )
+    params_node = None
+    for fname in param_parent_names:
+        params_node = node.child_by_field_name(fname)
+        if params_node:
+            break
+    if params_node is None:
+        for child in node.children:
+            if 'parameter' in child.type.lower():
+                params_node = child
+                break
+    if params_node is None:
+        return []
+
+    param_types = {
+        'parameter_declaration', 'formal_parameter', 'parameter',
+        'required_parameter', 'optional_parameter', 'rest_parameter',
+        'simple_parameter', 'typed_parameter', 'variadic_parameter',
+        'self_parameter', 'receiver_parameter',
+    }
+
+    params: list[dict] = []
+    for child in params_node.children:
+        if child.type not in param_types:
+            continue
+
+        name_n = (child.child_by_field_name('name')
+                  or child.child_by_field_name('pattern'))
+        type_n = child.child_by_field_name('type')
+
+        pname = _ts_text(name_n, src).strip() if name_n else ''
+        ptype = _ts_text(type_n, src).strip() if type_n else ''
+
+        if not pname and not ptype:
+            raw = _ts_text(child, src).strip()
+            if raw and raw not in (',', '(', ')'):
+                params.append({'name': raw, 'type': '', 'desc': ''})
+        else:
+            params.append({'name': pname, 'type': ptype, 'desc': ''})
+
+    return params
+
+
+def _extract_generic_ts_funcs(source: str, rel_path: str, ts_lang: str) -> list[dict]:
+    """
+    用 tree-sitter 通用策略提取函数（适用于 Java / Go / Rust / Ruby 等）。
+    """
+    if not _TREE_SITTER_OK:
+        return []
+
+    func_node_types = _TS_FUNC_TYPES.get(ts_lang, [])
+    if not func_node_types:
+        return []
+
+    try:
+        parser    = _ts_get_parser(ts_lang)
+        src_bytes = source.encode('utf-8', errors='replace')
+        tree      = parser.parse(src_bytes)
+    except Exception:
+        return []
+
+    func_nodes = _find_all_nodes(tree.root_node, set(func_node_types))
+    funcs: list[dict] = []
+
+    for node in func_nodes:
+        func_name = _ts_extract_name_generic(node, src_bytes, ts_lang)
+        if not func_name:
+            continue
+
+        params     = _ts_extract_params_generic(node, src_bytes)
+        start_line = node.start_point[0] + 1
+        end_line   = node.end_point[0]   + 1
+
+        # 签名：取节点前几行（到函数体开始之前）
+        raw_text   = _ts_text(node, src_bytes)
+        lines      = raw_text.split('\n')
+        sig_lines: list[str] = []
+        for line in lines[:6]:
+            sig_lines.append(line)
+            stripped = line.rstrip()
+            if stripped.endswith(('{', ':', '=>', 'do', '=')):
+                break
+        signature = ' '.join(l.strip() for l in sig_lines).strip()
+
+        funcs.append({
+            'name':        func_name,
+            'signature':   signature[:600],
+            'start_line':  start_line,
+            'end_line':    end_line,
+            'return_type': '',
+            'params':      params,
+            'file_path':   rel_path,
+        })
+
+    return funcs
+
+
+# ==================================================================
+# 7. ctags 兜底提取
+# ==================================================================
+
+def _extract_ctags_funcs(abs_path: str, rel_path: str) -> list[dict]:
+    """
+    用 Universal Ctags 提取函数名和行号（不依赖 tree-sitter）。
+    需要系统已安装 ctags（支持 --output-format=json）。
+    失败时静默返回空列表。
+    """
+    if not shutil.which('ctags'):
+        return []
+
+    try:
+        proc = subprocess.run(
+            [
+                'ctags', '--output-format=json',
+                '--fields=+ne', '--kinds-all=*',
+                '--languages=all', '-f', '-', abs_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            encoding='utf-8',
+            errors='replace',
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+
+    func_kinds = {
+        'function', 'method', 'constructor', 'destructor',
+        'f', 'm', 'c', 'd',
+    }
+
+    funcs: list[dict] = []
+    for line in proc.stdout.strip().split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+
+        kind = str(entry.get('kind', '')).lower()
+        if kind not in func_kinds:
+            continue
+
+        name = entry.get('name', '').strip()
         if not name:
             continue
 
-        # 解析后续字段（parts[3:] 之后为 "key:value" 或单字符 kind）
-        fields: dict[str, str] = {}
-        kind_raw = ''
-
-        for part in parts[3:]:
-            part = part.strip()
-            if ':' in part:
-                k, _, v = part.partition(':')
-                k = k.strip()
-                if k == 'kind':
-                    kind_raw = v.strip()
-                else:
-                    fields[k] = v.strip()
-            elif len(part) == 1 and part.isalpha() and not kind_raw:
-                kind_raw = part
-
-        # 过滤非函数类型
-        if kind_raw.lower() not in _FUNC_KINDS:
-            continue
-
-        # 解析行号
-        try:
-            start_line = int(fields.get('line', 0))
-        except (ValueError, TypeError):
-            continue
+        start_line = int(entry.get('line', 0))
         if start_line == 0:
             continue
 
-        try:
-            end_line = int(fields.get('end', start_line))
-        except (ValueError, TypeError):
-            end_line = start_line
-
-        # 去重
-        key = (name, start_line)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        # ctags 的 signature 字段（不含返回类型，仅参数括号部分）
-        ctags_sig = fields.get('signature', fields.get('S', ''))
-
-        functions.append({
-            'name':       name,
-            'signature':  f"{name}{ctags_sig}".strip() if ctags_sig else name,
-            'start_line': start_line,
-            'end_line':   end_line,
-            'params':     [],                           # 由 _enrich_ctags_io 补全
-            'returns':    {'type': '', 'desc': ''},     # 由 _enrich_ctags_io 补全
-        })
-
-    return functions
-
-
-def _extract_funcs_ctags(file_path: str, language: str) -> list[dict] | None:
-    """
-    用 Universal Ctags 提取函数列表。
-
-    Returns
-    -------
-    list[dict]  成功时（可能为空列表）
-    None        ctags 不可用或调用失败
-    """
-    if not _check_ctags():
-        return None
-
-    ctags_lang = _CTAGS_LANG_MAP.get(language)
-    cmd: list[str] = [
-        'ctags',
-        '--fields=+neS',           # n=行号, e=结束行, S=签名（Universal Ctags）
-        '--extras=-F',             # 排除文件级标签
-        '--output-format=u-ctags', # Universal Ctags 格式（有明确 key:value 字段）
-        '-f', '-',                 # 输出到 stdout
-        file_path,
-    ]
-    if ctags_lang:
-        cmd.insert(1, f'--languages={ctags_lang}')
-
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30
+        end_data = entry.get('end', {})
+        end_line = (
+            int(end_data['line'])
+            if isinstance(end_data, dict) and 'line' in end_data
+            else start_line
         )
-    except subprocess.TimeoutExpired:
-        print(f"[file_analyzer] ctags 超时：{os.path.basename(file_path)}")
-        return None
-    except Exception as e:
-        print(f"[file_analyzer] ctags 执行异常：{e}")
-        return None
 
-    if result.returncode != 0:
-        # --output-format=u-ctags 可能在 Exuberant Ctags 下失败
-        return None
-
-    return _parse_ctags_output(result.stdout)
-
-
-# ══════════════════════════════════════════════════════════════════
-#  C/C++ 签名解析 —— 为 ctags 结果补充 io 信息
-# ══════════════════════════════════════════════════════════════════
-
-# C/C++ 修饰符关键词，不属于返回类型本身
-_C_QUALIFIERS: frozenset[str] = frozenset({
-    'static', 'extern', 'inline', 'virtual', 'explicit',
-    'constexpr', 'consteval', 'constinit', 'friend', 'override', 'final',
-    '__inline__', '__forceinline', '__cdecl', '__stdcall',
-    # 常见宏修饰（minizip-ng 风格）
-    'ZEXPORT', 'ZEXPORTVA', 'MZ_EXPORT', 'MZ_EXTERN',
-})
-
-
-def _split_c_params(params_str: str) -> list[str]:
-    """
-    按逗号分割 C/C++ 参数字符串，正确处理括号/模板/函数指针嵌套。
-    """
-    result: list[str] = []
-    depth   = 0
-    current: list[str] = []
-    for ch in params_str:
-        if ch in '(<[{':
-            depth += 1
-            current.append(ch)
-        elif ch in ')>]}':
-            depth -= 1
-            current.append(ch)
-        elif ch == ',' and depth == 0:
-            result.append(''.join(current).strip())
-            current = []
-        else:
-            current.append(ch)
-    if current:
-        result.append(''.join(current).strip())
-    return [p for p in result if p]
-
-
-def _parse_c_io(signature: str) -> dict:
-    """
-    从 C/C++ 函数签名字符串解析参数列表和返回类型。
-
-    示例输入：
-      "int deflate_init(z_streamp strm, int level)"
-      "static MZ_EXPORT void * mz_alloc(void *opaque, size_t items, size_t size)"
-
-    Returns
-    -------
-    dict  {"params": [...], "returns": {"type": str, "desc": ""}}
-    """
-    io: dict = {'params': [], 'returns': {'type': '', 'desc': ''}}
-    sig = signature.strip()
-
-    # ── 找第一个 ( ──────────────────────────────────────────────────
-    paren_open = sig.find('(')
-    if paren_open == -1:
-        return io
-
-    before_paren = sig[:paren_open].strip()
-
-    # ── 找对应的 ) ──────────────────────────────────────────────────
-    depth = 1
-    idx = paren_open + 1
-    while idx < len(sig) and depth > 0:
-        if sig[idx] == '(':
-            depth += 1
-        elif sig[idx] == ')':
-            depth -= 1
-        idx += 1
-    params_str = sig[paren_open + 1: idx - 1].strip()
-
-    # ── 提取返回类型 ─────────────────────────────────────────────────
-    # before_paren 末尾的标识符是函数名，之前是返回类型（含修饰符）
-    name_match = re.search(r'(\b\w+)\s*$', before_paren)
-    if name_match:
-        ret_raw = before_paren[: name_match.start()].strip()
-    else:
-        ret_raw = ''
-
-    # 去掉存储类修饰符
-    ret_parts = [t for t in ret_raw.split() if t not in _C_QUALIFIERS]
-    io['returns']['type'] = ' '.join(ret_parts)
-
-    # ── 参数解析 ─────────────────────────────────────────────────────
-    if not params_str or params_str in ('void', ''):
-        return io
-
-    for param in _split_c_params(params_str):
-        param = param.strip()
-        if not param:
-            continue
-        if param == '...':
-            io['params'].append({'name': '...', 'type': '...', 'desc': ''})
-            continue
-
-        # 处理数组形式：int arr[]  →  name=arr, type=int []
-        arr_match = re.search(r'(\w+)\s*(\[\d*\])\s*$', param)
-        if arr_match:
-            pname = arr_match.group(1)
-            ptype = (param[: arr_match.start()].strip()
-                     + ' ' + arr_match.group(2)).strip()
-        else:
-            # 函数指针形式：void (*callback)(int) → 特殊处理
-            fp_match = re.search(r'\(\s*\*\s*(\w+)\s*\)', param)
-            if fp_match:
-                pname = fp_match.group(1)
-                ptype = param.replace(fp_match.group(0), '(*)', 1).strip()
-            else:
-                # 普通形式：最后一个标识符为参数名
-                tokens = re.findall(r'\w+', param)
-                if not tokens:
-                    continue
-                pname = tokens[-1]
-                # 去掉末尾参数名（保留指针 * & 等符号）
-                last_pos = param.rfind(pname)
-                ptype = param[:last_pos].rstrip('*& \t')
-                if not ptype:
-                    ptype = pname
-                    pname = ''
-
-        io['params'].append({
-            'name': pname,
-            'type': ptype.strip(),
-            'desc': '',
+        sig = entry.get('signature', '')
+        funcs.append({
+            'name':        name,
+            'signature':   f"{name}{sig}"[:600] if sig else name,
+            'start_line':  start_line,
+            'end_line':    end_line,
+            'return_type': '',
+            'params':      [],
+            'file_path':   rel_path,
         })
-
-    return io
-
-
-def _enrich_ctags_io(
-    funcs: list[dict],
-    file_path: str,
-    repo_rel_path: str,
-) -> list[dict]:
-    """
-    读取源文件，为 ctags 提取的函数补充完整签名及 io 信息。
-
-    做法：从 start_line 向后最多扫描 40 行，收集到第一个 '{' 或 ';' 止，
-    拼成完整函数声明行，再用 _parse_c_io 解析。
-
-    适用语言：C / C++ / Objective-C
-    """
-    content = _read_file_safe(file_path)
-    if content is None:
-        return funcs
-
-    lines       = content.splitlines()
-    total_lines = len(lines)
-
-    for func in funcs:
-        start = func['start_line']
-        if start < 1 or start > total_lines:
-            continue
-
-        # 向后收集行，直到遇到 '{' 或 ';'
-        collected: list[str] = []
-        for li in range(start - 1, min(start + 40, total_lines)):
-            row = lines[li].rstrip()
-            # 去掉行注释
-            row_no_comment = re.sub(r'//.*$', '', row)
-            collected.append(row_no_comment)
-            if '{' in row_no_comment or ';' in row_no_comment:
-                break
-
-        sig_raw = ' '.join(collected)
-        # 去掉 '{' 及其后内容
-        sig_raw = re.sub(r'\s*\{.*', '', sig_raw, flags=re.DOTALL).strip()
-        # 去掉行尾 ';'
-        sig_raw = sig_raw.rstrip(';').strip()
-        # 压缩多余空白
-        sig_raw = re.sub(r'\s+', ' ', sig_raw)
-
-        if sig_raw:
-            func['signature'] = sig_raw
-            io = _parse_c_io(sig_raw)
-            func['params']  = io['params']
-            func['returns'] = io['returns']
 
     return funcs
 
 
-# ══════════════════════════════════════════════════════════════════
-#  策略 3：LLM 提取（通用兜底）
-# ══════════════════════════════════════════════════════════════════
+# ==================================================================
+# 8. 函数提取分发器
+# ==================================================================
 
-def _extract_funcs_llm(
-    file_path: str,
-    file_name: str,
-    language: str,
-    repo_rel_path: str,
-) -> list[dict]:
+def _extract_funcs(abs_path: str, rel_path: str, language: str) -> list[dict]:
     """
-    调用 LLM 提取函数列表，适用于任意语言。
-    文件超过 _MAX_LINES_LLM 行时截断（末尾部分函数可能丢失）。
+    根据语言选择最合适的提取策略，按优先级降级：
 
-    Returns
-    -------
-    list[dict]  提取成功则返回函数列表；失败返回 []
+      1. Python → ast（精确）
+      2. C/C++  → tree-sitter 专用提取器
+      3. 其他有 TS 支持 → 通用 tree-sitter 提取器
+      4. ctags 兜底
+      5. 放弃：返回 []
+
+    返回列表每项：
+    {name, signature, start_line, end_line, return_type, params, file_path}
     """
-    from llm.client  import chat_completion_json
-    from llm.prompts import ANALYZE_FILE_FUNC_SYSTEM, ANALYZE_FILE_FUNC_USER
-    import config as _cfg
-
-    content = _read_file_safe(file_path)
-    if content is None:
-        print(f"[file_analyzer] 文件过大或无法读取，跳过 LLM 提取：{file_name}")
-        return []
-
-    numbered, total_lines = _add_line_numbers(content)
-    if total_lines > _MAX_LINES_LLM:
-        print(
-            f"[file_analyzer] {file_name} 共 {total_lines} 行，"
-            f"超限（{_MAX_LINES_LLM}），LLM 仅处理前 {_MAX_LINES_LLM} 行。"
-        )
-
-    # lang_lower 用于 Markdown 代码块高亮标注（去掉特殊字符）
-    lang_lower = language.lower().replace('+', 'p').replace('#', 'sharp')
-
-    user_msg = ANALYZE_FILE_FUNC_USER.format(
-        file_name        = file_name,
-        language         = language,
-        file_path        = repo_rel_path,
-        lang_lower       = lang_lower,
-        numbered_content = numbered,
-    )
-
-    messages = [
-        {'role': 'system', 'content': ANALYZE_FILE_FUNC_SYSTEM},
-        {'role': 'user',   'content': user_msg},
-    ]
-
-    print(
-        f"[file_analyzer] 调用 LLM 提取函数（{file_name}，"
-        f"模型 {_cfg.LLM_MODEL}）…"
-    )
-    try:
-        data = chat_completion_json(
-            messages=messages, temperature=0.1, max_tokens=8192
-        )
-    except Exception as e:
-        print(f"[file_analyzer] LLM 调用失败（{file_name}）：{e}")
-        return []
-
-    # 解析 LLM 输出
-    if isinstance(data, dict) and 'functions' in data:
-        raw_funcs = data['functions']
-    elif isinstance(data, list):
-        raw_funcs = data
-    else:
-        print(f"[file_analyzer] LLM 输出结构异常（{file_name}）：{type(data)}")
-        return []
-
-    functions: list[dict] = []
-    for item in raw_funcs:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get('name', '')).strip()
-        if not name:
-            continue
-
-        try:
-            start_line = int(item.get('start_line', 0))
-        except (ValueError, TypeError):
-            start_line = 0
-        try:
-            end_line = int(item.get('end_line', start_line))
-        except (ValueError, TypeError):
-            end_line = start_line
-
-        signature = str(item.get('signature', name)).strip()
-
-        # 规范化 params
-        raw_params = item.get('params', [])
-        params: list[dict] = []
-        if isinstance(raw_params, list):
-            for p in raw_params:
-                if isinstance(p, dict):
-                    params.append({
-                        'name': str(p.get('name', '')),
-                        'type': str(p.get('type', '')),
-                        'desc': str(p.get('desc', '')),
-                    })
-
-        # 规范化 returns
-        raw_ret = item.get('returns', {})
-        if isinstance(raw_ret, dict):
-            returns = {
-                'type': str(raw_ret.get('type', '')),
-                'desc': str(raw_ret.get('desc', '')),
-            }
-        else:
-            returns = {'type': str(raw_ret), 'desc': ''}
-
-        functions.append({
-            'name':       name,
-            'signature':  signature,
-            'start_line': start_line,
-            'end_line':   end_line,
-            'params':     params,
-            'returns':    returns,
-        })
-
-    return functions
-
-
-# ══════════════════════════════════════════════════════════════════
-#  主调度：按语言选择最优提取策略
-# ══════════════════════════════════════════════════════════════════
-
-def _extract_functions(
-    file_path: str,
-    file_name: str,
-    language: str,
-    repo_rel_path: str,
-) -> list[dict]:
-    """
-    函数提取入口，依次尝试：ast → ctags → LLM。
-
-    Returns
-    -------
-    list[dict]  每项键：name, signature, start_line, end_line, params, returns
-    """
-    # ── ① 无函数类语言直接跳过 ──────────────────────────────────────
     if language in _NO_FUNC_LANGS:
         return []
 
-    # ── ② Python：使用 ast 模块（精确） ─────────────────────────────
+    source = _read_source(abs_path)
+    if source is None:
+        return []
+
+    # ── Python ──────────────────────────────────────────────────────
     if language == 'Python':
-        funcs = _extract_funcs_python(file_path)
-        print(f"[file_analyzer]   策略=ast  → {len(funcs)} 个函数")
-        return funcs
+        return _extract_python_funcs(source, rel_path)
 
-    # ── ③ 尝试 ctags ─────────────────────────────────────────────────
-    ctags_funcs = _extract_funcs_ctags(file_path, language)
+    # ── C / C++ / Objective-C ──────────────────────────────────────
+    if language in ('C', 'C++', 'Objective-C'):
+        if _TREE_SITTER_OK:
+            result = _extract_c_cpp_funcs(source, rel_path, lang=language)
+            if result:
+                return result
+        return _extract_ctags_funcs(abs_path, rel_path)
 
-    if ctags_funcs is not None:
-        # ctags 可用
-        if ctags_funcs:
-            # 对 C/C++/Objective-C 补充 io 信息（从源码解析签名）
-            if language in ('C', 'C++', 'Objective-C'):
-                ctags_funcs = _enrich_ctags_io(ctags_funcs, file_path, repo_rel_path)
-            print(f"[file_analyzer]   策略=ctags → {len(ctags_funcs)} 个函数")
-            return ctags_funcs
-        else:
-            # ctags 返回空 → 对于 C/C++ 认为文件确实无函数；其他语言降级 LLM
-            if language in ('C', 'C++', 'Objective-C'):
-                print(f"[file_analyzer]   策略=ctags → 0 个函数（可信）")
-                return []
-            # 非 C/C++：ctags 可能不支持该语言格式，降级 LLM
-            print(f"[file_analyzer]   ctags 无结果，降级 LLM")
+    # ── 通用 tree-sitter 语言 ───────────────────────────────────────
+    ts_name = _LANG_TO_TS.get(language)
+    if ts_name and _TREE_SITTER_OK:
+        try:
+            result = _extract_generic_ts_funcs(source, rel_path, ts_name)
+            if result:
+                return result
+        except Exception:
+            pass   # 降级到 ctags
 
-    # ── ④ LLM 兜底 ───────────────────────────────────────────────────
-    funcs = _extract_funcs_llm(file_path, file_name, language, repo_rel_path)
-    print(f"[file_analyzer]   策略=LLM  → {len(funcs)} 个函数")
-    return funcs
+    # ── ctags 兜底 ──────────────────────────────────────────────────
+    return _extract_ctags_funcs(abs_path, rel_path)
 
 
-# ══════════════════════════════════════════════════════════════════
-#  analyze_file_func
-# ══════════════════════════════════════════════════════════════════
+# ==================================================================
+# 9. analyze_file_language（Step 5a）
+# ==================================================================
+
+def analyze_file_language(
+    repo_id: int,
+    db_path: Optional[str] = None,
+) -> dict[int, str]:
+    """
+    检测仓库内所有文件的编程语言，并写入 file.language 字段。
+
+    幂等：对已写入 language 的文件也会覆盖更新（保证重跑一致性）。
+    依赖：file 表中已有记录（请先执行 analyze_area_file）。
+
+    Parameters
+    ----------
+    repo_id : int
+        目标仓库 id（由 init_repo 返回）
+    db_path : str | None
+        SQLite 路径；不传则使用 config.DB_PATH
+
+    Returns
+    -------
+    dict[int, str]
+        {file_id → detected_language}
+
+    Raises
+    ------
+    ValueError
+        repo_id 在数据库中不存在
+    """
+    _db = db_path or DB_PATH
+
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_file_language] repo_id={repo_id} 不存在于数据库。")
+
+    repo_path = repo['path']
+    repo_name = repo['name']
+    print(f"[analyze_file_language] 目标仓库：{repo_name}（{repo_path}）")
+
+    all_files = FileDB.list_by_repo(repo_id, db_path=_db)
+    if not all_files:
+        print("[analyze_file_language] ⚠ 无 file 记录，请先执行 analyze_area_file。")
+        return {}
+
+    result: dict[int, str] = {}
+
+    for file_rec in all_files:
+        file_id  = file_rec['id']
+        filename = file_rec['name']
+        rel_path = file_rec['path']
+        abs_path = os.path.join(repo_path, rel_path)
+
+        lang = _detect_language(filename, abs_path)
+        FileDB.update(file_id, db_path=_db, language=lang)
+        result[file_id] = lang
+
+    # 打印语言分布摘要
+    lang_dist = Counter(result.values())
+    top = lang_dist.most_common(10)
+    print(
+        f"[analyze_file_language] ✓ 完成：{len(result)} 个文件已检测并写库。\n"
+        f"[analyze_file_language]   语言分布（Top {len(top)}）："
+    )
+    for lang, cnt in top:
+        bar = '█' * min(cnt, 40)
+        print(f"    {lang:<22s} {cnt:>4} 个文件  {bar}")
+
+    return result
+
+
+# ==================================================================
+# 10. analyze_file_func（Step 5b）
+# ==================================================================
 
 def analyze_file_func(
     repo_id: int,
-    db_path: str | None = None,
-    file_id: int | None = None,
+    db_path: Optional[str] = None,
     force: bool = False,
+    languages: Optional[list[str]] = None,
 ) -> dict[int, list[dict]]:
     """
-    提取文件中所有函数/方法，写入 func 表并更新 file.funclist。
+    解析仓库内所有文件的函数，写入 func 表并更新 file.funclist。
 
-    流程
-    ----
-    1. 获取目标文件列表（全部或指定 file_id）
-    2. 对每个文件调用 _extract_functions（ast / ctags / LLM 三档策略）
-    3. 将提取结果写入 func 表，更新 file.funclist
-    4. 支持 force 模式：已有记录时先清除再重建
+    语言策略（按优先级）：
+      Python      → ast 模块
+      C / C++     → tree-sitter 专用提取器
+      其他有支持   → tree-sitter 通用提取器
+      兜底         → ctags（只含名称和行号，io 留空）
+      无解         → 跳过
 
-    写入字段
-    --------
-    func.name      : 函数名
-    func.signature : 完整签名字符串
-    func.place     : {"file_path": str, "start_line": int, "end_line": int}
-    func.io        : {"params": [...], "returns": {"type": str, "desc": str}}
-    file.funclist  : [{"func_id": int, "name": str, "brief": ""}]
+    依赖：
+      - file 表已有记录（analyze_area_file 完成）
+      - file.language 已填充（analyze_file_language 完成，否则降级用扩展名检测）
 
     Parameters
     ----------
@@ -908,167 +890,192 @@ def analyze_file_func(
         目标仓库 id
     db_path : str | None
         SQLite 路径；不传则使用 config.DB_PATH
-    file_id : int | None
-        若指定，则只处理该文件；否则处理 repo 下所有文件
     force : bool
-        True = 若文件已有 func 记录则先全部删除再重建；
-        False = 跳过已有记录（可用于断点续跑）
+        True  = 先清除仓库所有旧 func 记录再重建
+        False = 已有 func 记录时抛出 ValueError
+    languages : list[str] | None
+        若提供，只处理指定语言的文件（如 ['C', 'C++']）；
+        None 则处理全部文件
 
     Returns
     -------
     dict[int, list[dict]]
-        {file_id: [{"func_id", "name", "start_line", "end_line"}, ...]}
+        键为 file_id，值为该文件已入库的函数列表，每项：
+        {
+            "func_id":     int,
+            "name":        str,
+            "signature":   str,
+            "start_line":  int,
+            "end_line":    int,
+            "return_type": str,
+            "params":      list[{name, type, desc}],
+        }
 
     Raises
     ------
     ValueError
-        repo_id 或 file_id 在数据库中不存在
+        · repo_id 不存在
+        · force=False 且已存在 func 记录
     """
     _db = db_path or DB_PATH
 
-    # ── ① 校验仓库 ──────────────────────────────────────────────────
+    # ── 取仓库信息 ────────────────────────────────────────────────
     repo = RepoDB.get_by_id(repo_id, db_path=_db)
     if repo is None:
-        raise ValueError(
-            f"[analyze_file_func] repo_id={repo_id} 不存在于数据库。"
-        )
+        raise ValueError(f"[analyze_file_func] repo_id={repo_id} 不存在于数据库。")
+
     repo_path = repo['path']
+    repo_name = repo['name']
+    print(f"[analyze_file_func] 目标仓库：{repo_name}（{repo_path}）")
 
-    # ── ② 确定目标文件列表 ──────────────────────────────────────────
-    if file_id is not None:
-        file_rec = FileDB.get_by_id(file_id, db_path=_db)
-        if file_rec is None:
+    # ── 处理已有 func 记录 ────────────────────────────────────────
+    existing_funcs = FuncDB.list_by_repo(repo_id, db_path=_db)
+    if existing_funcs:
+        if force:
+            for fn in existing_funcs:
+                FuncDB.delete(fn['id'], db_path=_db)
+            print(f"[analyze_file_func] 已清除 {len(existing_funcs)} 条旧 func 记录。")
+        else:
             raise ValueError(
-                f"[analyze_file_func] file_id={file_id} 不存在于数据库。"
+                f"[analyze_file_func] repo_id={repo_id} 已有 {len(existing_funcs)} 条 func 记录。"
+                " 如需重新提取，请传入 force=True。"
             )
-        files = [file_rec]
-    else:
-        files = FileDB.list_by_repo(repo_id, db_path=_db)
 
-    if not files:
-        print(
-            f"[analyze_file_func] ⚠ repo_id={repo_id} 暂无文件记录，"
-            "请先执行 analyze_area_file。"
-        )
+    # ── 取 file 列表 ─────────────────────────────────────────────
+    all_files = FileDB.list_by_repo(repo_id, db_path=_db)
+    if not all_files:
+        print("[analyze_file_func] ⚠ 无 file 记录，请先执行 analyze_area_file。")
         return {}
 
-    total_funcs_all = 0
-    result: dict[int, list[dict]] = {}
+    # 按语言过滤（可选）
+    if languages:
+        lang_set  = set(languages)
+        all_files = [f for f in all_files if f.get('language') in lang_set]
+        print(f"[analyze_file_func] 语言过滤 {lang_set}，剩余 {len(all_files)} 个文件。")
 
-    for file_rec in files:
-        fid       = file_rec['id']
-        fname     = file_rec['name']
-        fpath_rel = file_rec['path']
-        area_id   = file_rec['area_id']
+    # ── 逐文件提取 ───────────────────────────────────────────────
+    result:      dict[int, list[dict]] = {}
+    total_funcs  = 0
+    skip_count   = 0
+    err_count    = 0
 
-        # 优先取已分析的语言，否则实时推断
-        language = file_rec.get('language') or _detect_language(fname)
+    for file_rec in all_files:
+        file_id  = file_rec['id']
+        area_id  = file_rec['area_id']
+        filename = file_rec['name']
+        rel_path = file_rec['path']
+        abs_path = os.path.join(repo_path, rel_path)
 
-        # 构建文件绝对路径
-        file_abs = os.path.join(repo_path, fpath_rel.replace('/', os.sep))
-        if not os.path.isfile(file_abs):
-            print(f"[analyze_file_func] ⚠ 文件不存在，跳过：{fpath_rel}")
-            result[fid] = []
+        # file.language 可能尚未填写（analyze_file_language 未运行），此处兜底检测
+        language = (
+            file_rec.get('language')
+            or _detect_language(filename, abs_path)
+        )
+
+        if not os.path.isfile(abs_path):
+            print(f"[analyze_file_func] ⚠ 文件不存在，跳过：{rel_path}")
+            skip_count += 1
+            result[file_id] = []
             continue
 
-        # ── ③ 处理已有 func 记录 ────────────────────────────────────
-        existing_funcs = FuncDB.list_by_file(fid, db_path=_db)
-        if existing_funcs:
-            if force:
-                for ef in existing_funcs:
-                    FuncDB.delete(ef['id'], db_path=_db)
-                print(
-                    f"[analyze_file_func] force 模式：已清除 {len(existing_funcs)} 条旧记录"
-                    f"（{fname}）"
-                )
-            else:
-                # 断点续跑：保留已有数据
-                result[fid] = [
-                    {
-                        'func_id':    ef['id'],
-                        'name':       ef['name'],
-                        'start_line': (ef.get('place') or {}).get('start_line', 0),
-                        'end_line':   (ef.get('place') or {}).get('end_line',   0),
-                    }
-                    for ef in existing_funcs
-                ]
-                print(
-                    f"[analyze_file_func] 跳过（已有 {len(existing_funcs)} 个 func）：{fname}"
-                    " —— 传入 force=True 可强制重建"
-                )
-                total_funcs_all += len(existing_funcs)
+        # 提取函数
+        try:
+            extracted = _extract_funcs(abs_path, rel_path, language)
+        except Exception as exc:
+            print(f"[analyze_file_func] ⚠ 提取异常（{rel_path}）：{exc}")
+            err_count += 1
+            extracted = []
+
+        # ── 写入 func 表 ─────────────────────────────────────────
+        file_func_records: list[dict] = []
+        funclist_brief:    list[dict] = []
+        seen_sigs:         set[tuple] = set()
+
+        for fn in extracted:
+            func_name = fn['name']
+            signature = fn.get('signature', '')
+
+            # 同文件内去重 key：(name, signature 前 200 字节)
+            dedup = (func_name, signature[:200])
+            if dedup in seen_sigs:
                 continue
-
-        # ── ④ 提取函数 ──────────────────────────────────────────────
-        print(f"[analyze_file_func] 处理：{fpath_rel}（{language}）")
-        extracted = _extract_functions(file_abs, fname, language, fpath_rel)
-
-        # ── ⑤ 写入 func 表 ──────────────────────────────────────────
-        funclist:          list[dict] = []   # 写回 file.funclist
-        file_func_results: list[dict] = []   # 供调用方使用
-
-        for func_info in extracted:
-            func_name  = func_info['name']
-            signature  = func_info.get('signature') or func_name
-            start_line = func_info.get('start_line', 0)
-            end_line   = func_info.get('end_line', start_line)
-            params     = func_info.get('params', [])
-            returns    = func_info.get('returns', {'type': '', 'desc': ''})
+            seen_sigs.add(dedup)
 
             place: dict = {
-                'file_path':  fpath_rel,
-                'start_line': start_line,
-                'end_line':   end_line,
+                'file_path':  rel_path,
+                'start_line': fn['start_line'],
+                'end_line':   fn['end_line'],
             }
             io: dict = {
-                'params':  params,
-                'returns': returns,
+                'params':  fn.get('params', []),
+                'returns': {
+                    'type': fn.get('return_type', ''),
+                    'desc': '',
+                },
             }
 
             try:
                 func_id = FuncDB.create(
                     repo_id   = repo_id,
                     area_id   = area_id,
-                    file_id   = fid,
+                    file_id   = file_id,
                     name      = func_name,
                     signature = signature,
                     place     = place,
                     io        = io,
                     db_path   = _db,
                 )
-            except Exception as e:
-                # UNIQUE 约束冲突（同名同签名同文件）→ 跳过，不终止整体流程
+            except Exception as exc:
+                # UNIQUE 冲突或其他 DB 错误 → 跳过该函数
                 print(
-                    f"[analyze_file_func]   ⚠ 函数 '{func_name}' 写入失败"
-                    f"（跳过）：{e}"
+                    f"[analyze_file_func]   ⚠ 函数入库失败 "
+                    f"[{rel_path}:{fn['start_line']} {func_name}]: {exc}"
                 )
                 continue
 
-            funclist.append({
+            file_func_records.append({
+                'func_id':     func_id,
+                'name':        func_name,
+                'signature':   signature,
+                'start_line':  fn['start_line'],
+                'end_line':    fn['end_line'],
+                'return_type': fn.get('return_type', ''),
+                'params':      fn.get('params', []),
+            })
+            funclist_brief.append({
                 'func_id': func_id,
                 'name':    func_name,
-                'brief':   '',   # 留给 analyze_file_funclist_description（step14）填充
-            })
-            file_func_results.append({
-                'func_id':    func_id,
-                'name':       func_name,
-                'start_line': start_line,
-                'end_line':   end_line,
+                'brief':   '',   # 后续 analyze_file_funclist_description 填充
             })
 
-        # ── ⑥ 更新 file.funclist ────────────────────────────────────
-        FileDB.update(fid, db_path=_db, funclist=funclist)
+        # ── 更新 file.funclist ───────────────────────────────────
+        FileDB.update(file_id, db_path=_db, funclist=funclist_brief)
 
-        result[fid]      = file_func_results
-        total_funcs_all += len(file_func_results)
+        result[file_id] = file_func_records
+        n = len(file_func_records)
+        total_funcs += n
 
+        if n > 0:
+            print(
+                f"[analyze_file_func]   ✓ {rel_path:<55s} "
+                f"lang={language:<8s}  funcs={n}"
+            )
+
+    # ── 汇总输出 ─────────────────────────────────────────────────
+    files_with_funcs = sum(1 for v in result.values() if v)
+    print(
+        f"\n[analyze_file_func] ✓ 完成：\n"
+        f"  处理文件：{len(all_files)} 个\n"
+        f"  含函数文件：{files_with_funcs} 个\n"
+        f"  提取函数：{total_funcs} 个\n"
+        f"  跳过文件：{skip_count} 个\n"
+        f"  出错文件：{err_count} 个"
+    )
+    if not _TREE_SITTER_OK:
         print(
-            f"[analyze_file_func]   ✓ {fname}：{len(file_func_results)} 个函数已入库"
+            "[analyze_file_func] ⚠ tree-sitter-languages 未安装，"
+            "C/C++ 解析可能退化为 ctags 兜底。\n"
+            "   建议：pip install tree-sitter tree-sitter-languages"
         )
 
-    total_files = len(files)
-    print(
-        f"\n[analyze_file_func] ✓ 完成：处理 {total_files} 个文件，"
-        f"共提取 {total_funcs_all} 个函数。"
-    )
     return result

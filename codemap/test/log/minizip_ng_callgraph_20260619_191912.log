@@ -1,0 +1,43 @@
+19:19:12  INFO     ====================================================================
+19:19:12  INFO     minizip-ng  build_callgraph / analyze_func_callgraph 集成测试
+19:19:12  INFO     仓库路径    : C:\Users\caoye04\Desktop\repo_4_codemap\minizip-ng
+19:19:12  INFO     CodeQL 可用 : True
+19:19:12  INFO     日志文件    : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\test\log\minizip_ng_callgraph_20260619_191912.log
+19:19:12  INFO     ====================================================================
+19:19:12  INFO     
+────────────────────────────────────────────────────────────────────
+19:19:12  INFO     ▶ test_classify_file_type_user
+19:19:12  INFO     ────────────────────────────────────────────────────────────────────
+19:19:12  INFO     classify user 断言通过 ✓
+19:19:12  INFO     ◀ test_classify_file_type_user  完成
+19:19:12  INFO     
+────────────────────────────────────────────────────────────────────
+19:19:12  INFO     ▶ test_classify_file_type_lib
+19:19:12  INFO     ────────────────────────────────────────────────────────────────────
+19:19:12  INFO     classify lib 断言通过 ✓
+19:19:12  INFO     ◀ test_classify_file_type_lib  完成
+19:19:12  INFO     
+────────────────────────────────────────────────────────────────────
+19:19:12  INFO     ▶ test_normalize_path
+19:19:12  INFO     ────────────────────────────────────────────────────────────────────
+19:19:12  INFO     normalize_path 断言通过 ✓
+19:19:12  INFO     ◀ test_normalize_path  完成
+19:19:12  INFO     [db] 临时数据库 → C:\Users\caoye04\AppData\Local\Temp\pytest-of-caoye04\pytest-14\minizip_ng_callgraph0\codemap.db
+19:19:12  INFO     
+── 前置 [1/6]：init_repo ─────────────────────────────
+19:19:12  INFO     init_repo 完成，repo_id = 1
+19:19:12  INFO     
+── 前置 [2/6]：analyze_repo_language ────────────────
+19:19:12  INFO     主语言：C
+19:19:12  INFO     
+── 前置 [3/6]：analyze_repo_area ────────────────────
+19:19:34  INFO     划分 5 个 area
+19:19:34  INFO     
+── 前置 [4/6]：analyze_area_file ────────────────────
+19:19:35  INFO     共 92 个文件入库
+19:19:35  INFO     
+── 前置 [5/6]：analyze_file_language + analyze_file_func ─
+19:44:46  INFO     共 420 个函数入库
+19:44:46  INFO     
+── build_callgraph ───────────────────────────────────
+19:44:46  INFO     repo_id = 1

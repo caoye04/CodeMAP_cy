@@ -1,0 +1,504 @@
+00:56:46  INFO     ======================================================================
+00:56:46  INFO     minizip-ng  analyze_file_language + analyze_file_func 集成测试
+00:56:46  INFO     仓库路径  : C:\Users\caoye04\Desktop\repo_4_codemap\minizip-ng
+00:56:46  INFO     日志文件  : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\test\log\minizip_ng_func_20260621_005646.log
+00:56:46  INFO     ======================================================================
+00:56:46  INFO     [db] 创建临时数据库：C:\Users\caoye04\AppData\Local\Temp\pytest-of-caoye04\pytest-19\minizip_func0\codemap.db
+00:56:46  INFO     ── 前置 [1/4]：init_repo
+00:56:46  INFO     repo_id = 1
+00:56:46  INFO     ── 前置 [2/4]：analyze_repo_language
+00:56:46  INFO     主语言：C
+00:56:46  INFO     ── 前置 [3/4]：analyze_repo_area（需 LLM）
+00:57:05  INFO     共 5 个 area
+00:57:05  INFO     ── 前置 [4/4]：analyze_area_file
+00:57:06  INFO     共 92 个文件
+00:57:06  INFO     ── Step 5a：analyze_file_language
+00:57:06  INFO     语言检测完成，共 92 个文件
+00:57:06  INFO     
+00:57:06  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:06  INFO     ▶ test_returns_nonempty_dict
+00:57:06  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:06  INFO     断言通过：92 个文件 ✓
+00:57:06  INFO     ◀ test_returns_nonempty_dict  完成
+00:57:06  INFO     
+00:57:06  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:06  INFO     ▶ test_all_values_are_nonempty_strings
+00:57:06  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:06  INFO     断言通过：所有 language 为非空字符串 ✓
+00:57:06  INFO     ◀ test_all_values_are_nonempty_strings  完成
+00:57:06  INFO     
+00:57:06  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:06  INFO     ▶ test_c_files_detected_as_c
+00:57:06  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:06  INFO     断言通过：32 个 .c + 22 个 .h 均检测为 C ✓
+00:57:06  INFO     ◀ test_c_files_detected_as_c  完成
+00:57:06  INFO     
+00:57:06  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:06  INFO     ▶ test_db_language_field_updated
+00:57:06  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:06  INFO     断言通过：检查前 50 条，DB language 与返回值一致 ✓
+00:57:06  INFO     ◀ test_db_language_field_updated  完成
+00:57:06  INFO     
+00:57:06  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:06  INFO     ▶ test_no_unknown_on_c_ext
+00:57:06  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:06  INFO     断言通过：所有已知扩展名代码文件均非 Unknown ✓
+00:57:06  INFO     ◀ test_no_unknown_on_c_ext  完成
+00:57:06  INFO     ── Step 5b：analyze_file_func
+00:57:11  INFO     函数提取完成，共 771 个函数
+00:57:11  INFO     
+00:57:11  INFO     ┌── analyze_file_func 返回值摘要 [analyze_file_func 初次完成]
+00:57:11  INFO     │  总文件数=92  含函数文件=42  总函数数=771
+00:57:11  INFO     │
+00:57:11  INFO     │  file_id=   5  funcs=4
+00:57:11  INFO     │    [   95] minigzip_banner                          L29-33
+00:57:11  INFO     │    [   96] minigzip_help                            L35-44
+00:57:11  INFO     │    [   97] minigzip_copy                            L48-122
+00:57:11  INFO     │    [   98] main                                     L127-179
+00:57:11  INFO     │  file_id=   6  funcs=13
+00:57:11  INFO     │    [   99] minizip_banner                           L62-66
+00:57:11  INFO     │    [  100] minizip_help                             L68-96
+00:57:11  INFO     │    [  101] minizip_list                             L100-190
+00:57:11  INFO     │    [  102] minizip_add_entry_cb                     L194-201
+00:57:11  INFO     │    [  103] minizip_add_progress_cb                  L203-223
+00:57:11  INFO     │    [  104] minizip_add_overwrite_cb                 L225-252
+00:57:11  INFO     │    [  105] minizip_add                              L254-303
+00:57:11  INFO     │    [  106] minizip_extract_entry_cb                 L307-327
+00:57:11  INFO     │    [  107] minizip_extract_progress_cb              L329-348
+00:57:11  INFO     │    [  108] minizip_extract_overwrite_cb             L350-376
+00:57:11  INFO     │    ... 还有 3 个函数
+00:57:11  INFO     │  file_id=  10  funcs=3
+00:57:11  INFO     │    [  112] mz_crypt_rand                            L30-32
+00:57:11  INFO     │    [  113] mz_crypt_crc32_update                    L35-92
+00:57:11  INFO     │    [  114] mz_crypt_pbkdf2                          L95-179
+00:57:11  INFO     │  file_id=  12  funcs=29
+00:57:11  INFO     │    [  115] mz_crypt_rand                            L43-47
+00:57:11  INFO     │    [  116] mz_crypt_sha_reset                       L69-74
+00:57:11  INFO     │    [  117] mz_crypt_sha_begin                       L76-109
+00:57:11  INFO     │    [  118] mz_crypt_sha_update                      L111-139
+00:57:11  INFO     │    [  119] mz_crypt_sha_end                         L141-171
+00:57:11  INFO     │    [  120] mz_crypt_sha_set_algorithm               L173-179
+00:57:11  INFO     │    [  121] mz_crypt_sha_create                      L181-188
+00:57:11  INFO     │    [  122] mz_crypt_sha_delete                      L190-200
+00:57:11  INFO     │    [  123] mz_crypt_aes_free                        L212-218
+00:57:11  INFO     │    [  124] mz_crypt_aes_reset                       L220-222
+00:57:11  INFO     │    ... 还有 19 个函数
+00:57:11  INFO     │  file_id=  13  funcs=33
+00:57:11  INFO     │    [  144] mz_crypt_init                            L29-46
+00:57:11  INFO     │    [  145] mz_crypt_rand                            L48-53
+00:57:11  INFO     │    [  146] mz_crypt_sha_free                        L79-88
+00:57:11  INFO     │    [  147] mz_crypt_sha_reset                       L90-98
+00:57:11  INFO     │    [  148] mz_crypt_sha_begin                       L100-162
+00:57:11  INFO     │    [  149] mz_crypt_sha_update                      L164-199
+00:57:11  INFO     │    [  150] mz_crypt_sha_end                         L201-238
+00:57:11  INFO     │    [  151] mz_crypt_sha_set_algorithm               L240-246
+00:57:11  INFO     │    [  152] mz_crypt_sha_create                      L248-253
+00:57:11  INFO     │    [  153] mz_crypt_sha_delete                      L255-265
+00:57:11  INFO     │    ... 还有 23 个函数
+00:57:11  INFO     │  file_id=  14  funcs=30
+00:57:11  INFO     │    [  177] mz_crypt_rand                            L30-43
+00:57:11  INFO     │    [  178] mz_crypt_sha_free                        L61-71
+00:57:11  INFO     │    [  179] mz_crypt_sha_reset                       L73-77
+00:57:11  INFO     │    [  180] mz_crypt_sha_begin                       L79-122
+00:57:11  INFO     │    [  181] mz_crypt_sha_update                      L124-143
+00:57:11  INFO     │    [  182] mz_crypt_sha_end                         L145-171
+00:57:11  INFO     │    [  183] mz_crypt_sha_set_algorithm               L173-179
+00:57:11  INFO     │    [  184] mz_crypt_sha_create                      L181-186
+00:57:11  INFO     │    [  185] mz_crypt_sha_delete                      L188-198
+00:57:11  INFO     │    [  186] mz_crypt_aes_free                        L223-237
+00:57:11  INFO     │    ... 还有 20 个函数
+00:57:11  INFO     │  file_id=  15  funcs=30
+00:57:11  INFO     │    [  207] mz_crypt_rand                            L22-35
+00:57:11  INFO     │    [  208] mz_crypt_sha_free                        L52-60
+00:57:11  INFO     │    [  209] mz_crypt_sha_reset                       L62-66
+00:57:11  INFO     │    [  210] mz_crypt_sha_begin                       L68-119
+00:57:11  INFO     │    [  211] mz_crypt_sha_update                      L121-140
+00:57:11  INFO     │    [  212] mz_crypt_sha_end                         L142-167
+00:57:11  INFO     │    [  213] mz_crypt_sha_set_algorithm               L169-175
+00:57:11  INFO     │    [  214] mz_crypt_sha_create                      L177-182
+00:57:11  INFO     │    [  215] mz_crypt_sha_delete                      L184-194
+00:57:11  INFO     │    [  216] mz_crypt_aes_free                        L207-215
+00:57:11  INFO     │    ... 还有 20 个函数
+00:57:11  INFO     │  file_id=  16  funcs=13
+00:57:11  INFO     │    [  237] mz_path_combine                          L24-43
+00:57:11  INFO     │    [  238] mz_path_append_slash                     L45-54
+00:57:11  INFO     │    [  239] mz_path_remove_slash                     L56-67
+00:57:11  INFO     │    [  240] mz_path_has_slash                        L69-74
+00:57:11  INFO     │    [  241] mz_path_convert_slashes                  L76-84
+00:57:11  INFO     │    [  242] mz_path_compare_wc                       L86-127
+00:57:11  INFO     │    [  243] mz_path_resolve                          L129-211
+00:57:11  INFO     │    [  244] mz_path_remove_filename                  L213-234
+00:57:11  INFO     │    [  245] mz_path_remove_extension                 L236-259
+00:57:11  INFO     │    [  246] mz_path_get_filename                     L261-278
+00:57:11  INFO     │    ... 还有 3 个函数
+00:57:11  INFO     │  file_id=  18  funcs=24
+00:57:11  INFO     │    [  250] mz_os_utf8_string_create                 L48-90
+00:57:11  INFO     │    [  251] mz_os_utf8_string_delete                 L97-102
+00:57:11  INFO     │    [  252] mz_os_rand                               L107-120
+00:57:11  INFO     │    [  253] mz_os_rename                             L161-166
+00:57:11  INFO     │    [  254] mz_os_path_same_fs                       L168-175
+00:57:11  INFO     │    [  255] mz_os_unlink                             L177-182
+00:57:11  INFO     │    [  256] mz_os_file_exists                        L184-191
+00:57:11  INFO     │    [  257] mz_os_get_file_size                      L193-206
+00:57:11  INFO     │    [  258] mz_os_get_file_date                      L208-236
+00:57:11  INFO     │    [  259] mz_os_set_file_date                      L238-251
+00:57:11  INFO     │    ... 还有 14 个函数
+00:57:11  INFO     │  file_id=  19  funcs=29
+00:57:11  INFO     │    [  274] mz_os_unicode_string_create              L42-55
+00:57:11  INFO     │    [  275] mz_os_unicode_string_delete              L57-62
+00:57:11  INFO     │    [  276] mz_os_utf8_string_create                 L64-81
+00:57:11  INFO     │    [  277] mz_os_utf8_string_create_from_unicode    L83-96
+00:57:11  INFO     │    [  278] mz_os_utf8_string_delete                 L98-103
+00:57:11  INFO     │    [  279] mz_os_rand                               L107-118
+00:57:11  INFO     │    [  280] mz_os_path_same_fs                       L120-147
+00:57:11  INFO     │    [  281] mz_os_rename                             L149-183
+00:57:11  INFO     │    [  282] mz_os_unlink                             L185-206
+00:57:11  INFO     │    [  283] mz_os_file_exists                        L208-225
+00:57:11  INFO     │    ... 还有 19 个函数
+00:57:11  INFO     │  file_id=  20  funcs=44
+00:57:11  INFO     │    [  303] mz_stream_open                           L20-25
+00:57:11  INFO     │    [  304] mz_stream_is_open                        L27-32
+00:57:11  INFO     │    [  305] mz_stream_read                           L34-41
+00:57:11  INFO     │    [  306] mz_stream_read_value                     L43-58
+00:57:11  INFO     │    [  307] mz_stream_read_uint8                     L60-69
+00:57:11  INFO     │    [  308] mz_stream_read_uint16                    L71-80
+00:57:11  INFO     │    [  309] mz_stream_read_uint32                    L82-91
+00:57:11  INFO     │    [  310] mz_stream_read_int64                     L93-95
+00:57:11  INFO     │    [  311] mz_stream_read_uint64                    L97-99
+00:57:11  INFO     │    [  312] mz_stream_write                          L101-110
+00:57:11  INFO     │    ... 还有 34 个函数
+00:57:11  INFO     │  file_id=  22  funcs=13
+00:57:11  INFO     │    [  347] mz_stream_buffered_reset                 L60-70
+00:57:11  INFO     │    [  348] mz_stream_buffered_open                  L72-77
+00:57:11  INFO     │    [  349] mz_stream_buffered_is_open               L79-82
+00:57:11  INFO     │    [  350] mz_stream_buffered_flush                 L84-115
+00:57:11  INFO     │    [  351] mz_stream_buffered_read                  L117-183
+00:57:11  INFO     │    [  352] mz_stream_buffered_write                 L185-245
+00:57:11  INFO     │    [  353] mz_stream_buffered_tell                  L247-261
+00:57:11  INFO     │    [  354] mz_stream_buffered_seek                  L263-332
+00:57:11  INFO     │    [  355] mz_stream_buffered_close                 L334-356
+00:57:11  INFO     │    [  356] mz_stream_buffered_error                 L358-361
+00:57:11  INFO     │    ... 还有 3 个函数
+00:57:11  INFO     │  file_id=  24  funcs=16
+00:57:11  INFO     │    [  360] mz_stream_bzip_open                      L43-86
+00:57:11  INFO     │    [  361] mz_stream_bzip_is_open                   L88-93
+00:57:11  INFO     │    [  362] mz_stream_bzip_read                      L95-167
+00:57:11  INFO     │    [  363] mz_stream_bzip_flush                     L170-175
+00:57:11  INFO     │    [  364] mz_stream_bzip_compress                  L177-216
+00:57:11  INFO     │    [  365] mz_stream_bzip_write                     L219-240
+00:57:11  INFO     │    [  366] mz_stream_bzip_tell                      L242-246
+00:57:11  INFO     │    [  367] mz_stream_bzip_seek                      L248-254
+00:57:11  INFO     │    [  368] mz_stream_bzip_close                     L256-281
+00:57:11  INFO     │    [  369] mz_stream_bzip_error                     L283-286
+00:57:11  INFO     │    ... 还有 6 个函数
+00:57:11  INFO     │  file_id=  26  funcs=14
+00:57:11  INFO     │    [  376] mz_stream_libcomp_open                   L43-88
+00:57:11  INFO     │    [  377] mz_stream_libcomp_is_open                L90-95
+00:57:11  INFO     │    [  378] mz_stream_libcomp_read                   L97-171
+00:57:11  INFO     │    [  379] mz_stream_libcomp_flush                  L173-178
+00:57:11  INFO     │    [  380] mz_stream_libcomp_deflate                L180-219
+00:57:11  INFO     │    [  381] mz_stream_libcomp_write                  L221-237
+00:57:11  INFO     │    [  382] mz_stream_libcomp_tell                   L239-243
+00:57:11  INFO     │    [  383] mz_stream_libcomp_seek                   L245-251
+00:57:11  INFO     │    [  384] mz_stream_libcomp_close                  L253-276
+00:57:11  INFO     │    [  385] mz_stream_libcomp_error                  L278-281
+00:57:11  INFO     │    ... 还有 4 个函数
+00:57:11  INFO     │  file_id=  28  funcs=15
+00:57:11  INFO     │    [  390] mz_stream_lzma_open                      L52-138
+00:57:11  INFO     │    [  391] mz_stream_lzma_is_open                   L140-145
+00:57:11  INFO     │    [  392] mz_stream_lzma_read                      L147-241
+00:57:11  INFO     │    [  393] mz_stream_lzma_flush                     L244-271
+00:57:11  INFO     │    [  394] mz_stream_lzma_code                      L273-308
+00:57:11  INFO     │    [  395] mz_stream_lzma_write                     L311-332
+00:57:11  INFO     │    [  396] mz_stream_lzma_tell                      L334-338
+00:57:11  INFO     │    [  397] mz_stream_lzma_seek                      L340-346
+00:57:11  INFO     │    [  398] mz_stream_lzma_close                     L348-373
+00:57:11  INFO     │    [  399] mz_stream_lzma_error                     L375-378
+00:57:11  INFO     │    ... 还有 5 个函数
+00:57:11  INFO     │  file_id=  30  funcs=19
+00:57:11  INFO     │    [  405] mz_stream_mem_set_size                   L52-69
+00:57:11  INFO     │    [  406] mz_stream_mem_open                       L71-87
+00:57:11  INFO     │    [  407] mz_stream_mem_is_open                    L89-94
+00:57:11  INFO     │    [  408] mz_stream_mem_read                       L96-111
+00:57:11  INFO     │    [  409] mz_stream_mem_write                      L113-144
+00:57:11  INFO     │    [  410] mz_stream_mem_tell                       L146-149
+00:57:11  INFO     │    [  411] mz_stream_mem_seek                       L151-186
+00:57:11  INFO     │    [  412] mz_stream_mem_close                      L188-193
+00:57:11  INFO     │    [  413] mz_stream_mem_error                      L195-200
+00:57:11  INFO     │    [  414] mz_stream_mem_set_buffer                 L202-207
+00:57:11  INFO     │    ... 还有 9 个函数
+00:57:11  INFO     │  file_id=  33  funcs=11
+00:57:11  INFO     │    [  424] mz_stream_os_open                        L71-110
+00:57:11  INFO     │    [  425] mz_stream_os_is_open                     L112-117
+00:57:11  INFO     │    [  426] mz_stream_os_read                        L119-127
+00:57:11  INFO     │    [  427] mz_stream_os_write                       L129-137
+00:57:11  INFO     │    [  428] mz_stream_os_tell                        L139-147
+00:57:11  INFO     │    [  429] mz_stream_os_seek                        L149-173
+00:57:11  INFO     │    [  430] mz_stream_os_close                       L175-187
+00:57:11  INFO     │    [  431] mz_stream_os_error                       L189-192
+00:57:11  INFO     │    [  432] mz_stream_os_create                      L194-199
+00:57:11  INFO     │    [  433] mz_stream_os_delete                      L201-208
+00:57:11  INFO     │    ... 还有 1 个函数
+00:57:11  INFO     │  file_id=  34  funcs=12
+00:57:11  INFO     │    [  435] mz_stream_os_open                        L70-120
+00:57:11  INFO     │    [  436] mz_stream_os_is_open                     L122-127
+00:57:11  INFO     │    [  437] mz_stream_os_read                        L129-145
+00:57:11  INFO     │    [  438] mz_stream_os_write                       L147-163
+00:57:11  INFO     │    [  439] mz_stream_os_seekinternal                L165-191
+00:57:11  INFO     │    [  440] mz_stream_os_tell                        L193-208
+00:57:11  INFO     │    [  441] mz_stream_os_seek                        L210-244
+00:57:11  INFO     │    [  442] mz_stream_os_close                       L246-254
+00:57:11  INFO     │    [  443] mz_stream_os_error                       L256-259
+00:57:11  INFO     │    [  444] mz_stream_os_create                      L261-266
+00:57:11  INFO     │    ... 还有 2 个函数
+00:57:11  INFO     │  file_id=  35  funcs=19
+00:57:11  INFO     │    [  447] mz_stream_pkcrypt_decrypt_byte           L64-73
+00:57:11  INFO     │    [  448] mz_stream_pkcrypt_update_keys            L75-89
+00:57:11  INFO     │    [  449] mz_stream_pkcrypt_init_keys              L91-102
+00:57:11  INFO     │    [  450] mz_stream_pkcrypt_open                   L106-168
+00:57:11  INFO     │    [  451] mz_stream_pkcrypt_is_open                L170-175
+00:57:11  INFO     │    [  452] mz_stream_pkcrypt_read                   L177-196
+00:57:11  INFO     │    [  453] mz_stream_pkcrypt_write                  L198-228
+00:57:11  INFO     │    [  454] mz_stream_pkcrypt_tell                   L230-233
+00:57:11  INFO     │    [  455] mz_stream_pkcrypt_seek                   L235-238
+00:57:11  INFO     │    [  456] mz_stream_pkcrypt_close                  L240-244
+00:57:11  INFO     │    ... 还有 9 个函数
+00:57:11  INFO     │  file_id=  37  funcs=20
+00:57:11  INFO     │    [  466] mz_ppmd_alloc_func                       L100-103
+00:57:11  INFO     │    [  467] mz_ppmd_free_func                        L106-109
+00:57:11  INFO     │    [  468] writer                                   L113-119
+00:57:11  INFO     │    [  469] mz_stream_ppmd_flush                     L121-132
+00:57:11  INFO     │    [  470] mz_setup_buffered_writer                 L134-142
+00:57:11  INFO     │    [  471] reader                                   L147-165
+00:57:11  INFO     │    [  472] mz_setup_buffered_reader                 L167-177
+00:57:11  INFO     │    [  473] mz_stream_ppmd_open                      L181-298
+00:57:11  INFO     │    [  474] mz_stream_ppmd_is_open                   L300-305
+00:57:11  INFO     │    [  475] mz_stream_ppmd_read                      L307-357
+00:57:11  INFO     │    ... 还有 10 个函数
+00:57:11  INFO     │  file_id=  39  funcs=16
+00:57:11  INFO     │    [  486] mz_stream_split_open_disk                L64-139
+00:57:11  INFO     │    [  487] mz_stream_split_close_disk               L141-149
+00:57:11  INFO     │    [  488] mz_stream_split_goto_disk                L151-171
+00:57:11  INFO     │    [  489] mz_stream_split_open                     L173-205
+00:57:11  INFO     │    [  490] mz_stream_split_is_open                  L207-212
+00:57:11  INFO     │    [  491] mz_stream_split_read                     L214-250
+00:57:11  INFO     │    [  492] mz_stream_split_write                    L252-306
+00:57:11  INFO     │    [  493] mz_stream_split_tell                     L308-315
+00:57:11  INFO     │    [  494] mz_stream_split_seek                     L317-345
+00:57:11  INFO     │    [  495] mz_stream_split_close                    L347-354
+00:57:11  INFO     │    ... 还有 6 个函数
+00:57:11  INFO     │  file_id=  41  funcs=16
+00:57:11  INFO     │    [  502] mz_stream_wzaes_open                     L56-142
+00:57:11  INFO     │    [  503] mz_stream_wzaes_is_open                  L144-149
+00:57:11  INFO     │    [  504] mz_stream_wzaes_ctr_encrypt              L151-176
+00:57:11  INFO     │    [  505] mz_stream_wzaes_read                     L178-198
+00:57:11  INFO     │    [  506] mz_stream_wzaes_write                    L200-229
+00:57:11  INFO     │    [  507] mz_stream_wzaes_tell                     L231-234
+00:57:11  INFO     │    [  508] mz_stream_wzaes_seek                     L236-239
+00:57:11  INFO     │    [  509] mz_stream_wzaes_close                    L241-266
+00:57:11  INFO     │    [  510] mz_stream_wzaes_error                    L268-271
+00:57:11  INFO     │    [  511] mz_stream_wzaes_set_password             L273-276
+00:57:11  INFO     │    ... 还有 6 个函数
+00:57:11  INFO     │  file_id=  43  funcs=15
+00:57:11  INFO     │    [  518] mz_stream_zlib_open                      L65-107
+00:57:11  INFO     │    [  519] mz_stream_zlib_is_open                   L109-114
+00:57:11  INFO     │    [  520] mz_stream_zlib_read                      L116-193
+00:57:11  INFO     │    [  521] mz_stream_zlib_flush                     L196-201
+00:57:11  INFO     │    [  522] mz_stream_zlib_deflate                   L203-240
+00:57:11  INFO     │    [  523] mz_stream_zlib_write                     L243-264
+00:57:11  INFO     │    [  524] mz_stream_zlib_tell                      L266-270
+00:57:11  INFO     │    [  525] mz_stream_zlib_seek                      L272-278
+00:57:11  INFO     │    [  526] mz_stream_zlib_close                     L280-305
+00:57:11  INFO     │    [  527] mz_stream_zlib_error                     L307-310
+00:57:11  INFO     │    ... 还有 5 个函数
+00:57:11  INFO     │  file_id=  45  funcs=15
+00:57:11  INFO     │    [  533] mz_stream_zstd_open                      L48-79
+00:57:11  INFO     │    [  534] mz_stream_zstd_is_open                   L81-86
+00:57:11  INFO     │    [  535] mz_stream_zstd_read                      L88-155
+00:57:11  INFO     │    [  536] mz_stream_zstd_flush                     L158-163
+00:57:11  INFO     │    [  537] mz_stream_zstd_compress                  L165-204
+00:57:11  INFO     │    [  538] mz_stream_zstd_write                     L207-229
+00:57:11  INFO     │    [  539] mz_stream_zstd_tell                      L231-235
+00:57:11  INFO     │    [  540] mz_stream_zstd_seek                      L237-243
+00:57:11  INFO     │    [  541] mz_stream_zstd_close                     L245-268
+00:57:11  INFO     │    [  542] mz_stream_zstd_error                     L270-273
+00:57:11  INFO     │    ... 还有 5 个函数
+00:57:11  INFO     │  file_id=  47  funcs=81
+00:57:11  INFO     │    [  548] mz_zip_search_eocd                       L133-149
+00:57:11  INFO     │    [  549] mz_zip_search_zip64_eocd                 L152-190
+00:57:11  INFO     │    [  550] mz_zip_get_pk_verify                     L194-200
+00:57:11  INFO     │    [  551] mz_zip_entry_read_header                 L204-481
+00:57:11  INFO     │    [  552] if                                       L417-442
+00:57:11  INFO     │    [  553] if                                       L444-446
+00:57:11  INFO     │    [  554] mz_zip_entry_read_descriptor             L483-523
+00:57:11  INFO     │    [  555] mz_zip_entry_write_crc_sizes             L525-551
+00:57:11  INFO     │    [  556] mz_zip_entry_needs_zip64                 L553-594
+00:57:11  INFO     │    [  557] mz_zip_entry_write_header                L596-922
+00:57:11  INFO     │    ... 还有 71 个函数
+00:57:11  INFO     │  file_id=  49  funcs=76
+00:57:11  INFO     │    [  629] mz_zip_reader_is_open                    L67-74
+00:57:11  INFO     │    [  630] mz_zip_reader_open                       L76-100
+00:57:11  INFO     │    [  631] mz_zip_reader_open_file                  L102-134
+00:57:11  INFO     │    [  632] mz_zip_reader_open_file_in_memory        L136-187
+00:57:11  INFO     │    [  633] mz_zip_reader_open_buffer                L189-215
+00:57:11  INFO     │    [  634] mz_zip_reader_close                      L217-245
+00:57:11  INFO     │    [  635] mz_zip_reader_unzip_cd                   L249-310
+00:57:11  INFO     │    [  636] mz_zip_reader_locate_entry_cb            L314-320
+00:57:11  INFO     │    [  637] mz_zip_reader_goto_first_entry           L322-342
+00:57:11  INFO     │    [  638] mz_zip_reader_goto_next_entry            L344-364
+00:57:11  INFO     │    ... 还有 66 个函数
+00:57:11  INFO     │  file_id=  53  funcs=3
+00:57:11  INFO     │    [    1] decrypt_byte                             L44-52
+00:57:11  INFO     │    [    2] update_keys                              L57-66
+00:57:11  INFO     │    [    3] init_keys                                L71-79
+00:57:11  INFO     │  file_id=  54  funcs=18
+00:57:11  INFO     │    [    4] mz_stream_ioapi_open                     L42-64
+00:57:11  INFO     │    [    5] mz_stream_ioapi_is_open                  L66-71
+00:57:11  INFO     │    [    6] mz_stream_ioapi_read                     L73-91
+00:57:11  INFO     │    [    7] mz_stream_ioapi_write                    L93-113
+00:57:11  INFO     │    [    8] mz_stream_ioapi_tell                     L115-127
+00:57:11  INFO     │    [    9] mz_stream_ioapi_seek                     L129-145
+00:57:11  INFO     │    [   10] mz_stream_ioapi_close                    L147-168
+00:57:11  INFO     │    [   11] mz_stream_ioapi_error                    L170-188
+00:57:11  INFO     │    [   12] mz_stream_ioapi_set_filefunc             L190-194
+00:57:11  INFO     │    [   13] mz_stream_ioapi_set_filefunc64           L196-200
+00:57:11  INFO     │    ... 还有 8 个函数
+00:57:11  INFO     │  file_id=  56  funcs=44
+00:57:11  INFO     │    [   22] unzOpen                                  L35-37
+00:57:11  INFO     │    [   23] unzOpen64                                L39-41
+00:57:11  INFO     │    [   24] unzOpen2                                 L43-78
+00:57:11  INFO     │    [   25] unzOpen2_64                              L80-115
+00:57:11  INFO     │    [   26] unzGetHandle_MZ                          L117-122
+00:57:11  INFO     │    [   27] unzGetStream_MZ                          L124-129
+00:57:11  INFO     │    [   28] unzOpen_MZ                               L131-159
+00:57:11  INFO     │    [   29] unzClose                                 L161-179
+00:57:11  INFO     │    [   30] unzClose_MZ                              L182-193
+00:57:11  INFO     │    [   31] unzGetGlobalInfo                         L195-211
+00:57:11  INFO     │    ... 还有 34 个函数
+00:57:11  INFO     │  file_id=  58  funcs=29
+00:57:11  INFO     │    [   66] zipConvertAppendToStreamMode             L30-44
+00:57:11  INFO     │    [   67] zipOpen                                  L46-48
+00:57:11  INFO     │    [   68] zipOpen64                                L50-52
+00:57:11  INFO     │    [   69] zipOpen2                                 L54-91
+00:57:11  INFO     │    [   70] zipOpen2_64                              L93-130
+00:57:11  INFO     │    [   71] zipOpen_MZ                               L132-161
+00:57:11  INFO     │    [   72] zipGetHandle_MZ                          L163-168
+00:57:11  INFO     │    [   73] zipGetStream_MZ                          L170-175
+00:57:11  INFO     │    [   74] zipConvertZipDateToTime                  L177-182
+00:57:11  INFO     │    [   75] zipOpenNewFileInZip5                     L184-244
+00:57:11  INFO     │    ... 还有 19 个函数
+00:57:11  INFO     │  ... （还有 12 个文件未展示）
+00:57:11  INFO     └──────────────────────────────────────────────────────────────
+00:57:11  INFO     
+00:57:11  INFO     ┌── DB func 表统计 [analyze_file_func 初次完成]
+00:57:11  INFO     │  func 总记录数 = 771
+00:57:11  INFO     │  涉及文件数 = 42  Top 15 函数密集文件：
+00:57:11  INFO     │      81  mz_zip.c
+00:57:11  INFO     │      76  mz_zip_rw.c
+00:57:11  INFO     │      44  compat/unzip.c
+00:57:11  INFO     │      44  mz_strm.c
+00:57:11  INFO     │      33  mz_crypt_openssl.c
+00:57:11  INFO     │      30  mz_crypt_winvista.c
+00:57:11  INFO     │      30  mz_crypt_winxp.c
+00:57:11  INFO     │      29  compat/zip.c
+00:57:11  INFO     │      29  mz_crypt_apple.c
+00:57:11  INFO     │      29  mz_os_win32.c
+00:57:11  INFO     │      24  mz_os_posix.c
+00:57:11  INFO     │      23  test/test_crypt.cc
+00:57:11  INFO     │      20  mz_strm_ppmd.c
+00:57:11  INFO     │      19  mz_strm_mem.c
+00:57:11  INFO     │      19  mz_strm_pkcrypt.c
+00:57:11  INFO     └──────────────────────────────────────────────────────────────
+00:57:11  INFO     
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     ▶ test_return_type_and_nonempty
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     断言通过：771 个函数，92 个文件键 ✓
+00:57:11  INFO     ◀ test_return_type_and_nonempty  完成
+00:57:11  INFO     
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     ▶ test_c_files_have_functions
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     断言通过：32/32 个 .c 文件含函数 （100%）✓
+00:57:11  INFO     ◀ test_c_files_have_functions  完成
+00:57:11  INFO     
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     ▶ test_each_func_has_required_fields
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     断言通过：771 个函数条目字段完整 ✓
+00:57:11  INFO     ◀ test_each_func_has_required_fields  完成
+00:57:11  INFO     
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     ▶ test_no_duplicate_func_ids
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     断言通过：771 个 func_id 均唯一 ✓
+00:57:11  INFO     ◀ test_no_duplicate_func_ids  完成
+00:57:11  INFO     
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     ▶ test_db_func_records_match_return
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     断言通过：DB func 记录数 771 与返回值一致 ✓
+00:57:11  INFO     ◀ test_db_func_records_match_return  完成
+00:57:11  INFO     
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     ▶ test_func_place_and_io_fields_in_db
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     断言通过：100 条 func 记录的 place / io 字段均合法 ✓
+00:57:11  INFO     ◀ test_func_place_and_io_fields_in_db  完成
+00:57:11  INFO     
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     ▶ test_func_fk_correct
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     断言通过：外键 repo_id / file_id 均正确 ✓
+00:57:11  INFO     ◀ test_func_fk_correct  完成
+00:57:11  INFO     
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     ▶ test_file_funclist_updated
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     断言通过：92 个文件的 funclist 均已正确更新 ✓
+00:57:11  INFO     ◀ test_file_funclist_updated  完成
+00:57:11  INFO     
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:11  INFO     ▶ test_c_funcs_have_param_info
+00:57:11  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:12  INFO     断言通过：417/417 个多参数 C 函数 解析到 params（100%）✓
+00:57:12  INFO     ◀ test_c_funcs_have_param_info  完成
+00:57:12  INFO     
+00:57:12  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:12  INFO     ▶ test_force_false_raises
+00:57:12  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:12  INFO     断言通过：force=False 重复调用抛出 ValueError ✓
+00:57:12  INFO     ◀ test_force_false_raises  完成
+00:57:12  INFO     
+00:57:12  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:12  INFO     ▶ test_force_true_reanalysis
+00:57:12  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:12  INFO     旧 func_id 数量：771
+00:57:21  INFO     
+00:57:21  INFO     ┌── DB func 表统计 [force=True 重新提取后]
+00:57:21  INFO     │  func 总记录数 = 771
+00:57:21  INFO     │  涉及文件数 = 42  Top 15 函数密集文件：
+00:57:21  INFO     │      81  mz_zip.c
+00:57:21  INFO     │      76  mz_zip_rw.c
+00:57:21  INFO     │      44  compat/unzip.c
+00:57:21  INFO     │      44  mz_strm.c
+00:57:21  INFO     │      33  mz_crypt_openssl.c
+00:57:21  INFO     │      30  mz_crypt_winvista.c
+00:57:21  INFO     │      30  mz_crypt_winxp.c
+00:57:21  INFO     │      29  compat/zip.c
+00:57:21  INFO     │      29  mz_crypt_apple.c
+00:57:21  INFO     │      29  mz_os_win32.c
+00:57:21  INFO     │      24  mz_os_posix.c
+00:57:21  INFO     │      23  test/test_crypt.cc
+00:57:21  INFO     │      20  mz_strm_ppmd.c
+00:57:21  INFO     │      19  mz_strm_mem.c
+00:57:21  INFO     │      19  mz_strm_pkcrypt.c
+00:57:21  INFO     └──────────────────────────────────────────────────────────────
+00:57:21  INFO     断言通过：force=True 重新提取 771 个函数，旧 771 条已清除 ✓
+00:57:21  INFO     ◀ test_force_true_reanalysis  完成
+00:57:21  INFO     
+00:57:21  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:21  INFO     ▶ test_languages_filter
+00:57:21  INFO     ──────────────────────────────────────────────────────────────────────
+00:57:30  INFO     断言通过：languages=["C"] 过滤后，仅包含 C 文件（54 个，共 707 个函数）✓
+00:57:30  INFO     ◀ test_languages_filter  完成

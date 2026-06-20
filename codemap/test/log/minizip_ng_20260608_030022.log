@@ -1,0 +1,45 @@
+03:00:22  INFO     ====================================================================
+03:00:22  INFO     minizip-ng 集成测试开始
+03:00:22  INFO     仓库路径  : C:\Users\caoye04\Desktop\repo_4_codemap\minizip-ng
+03:00:22  INFO     日志文件  : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\test\log\minizip_ng_20260608_030022.log
+03:00:22  INFO     ====================================================================
+03:00:22  INFO     [db] 创建临时数据库 → C:\Users\caoye04\AppData\Local\Temp\pytest-of-caoye04\pytest-8\minizip_ng0\codemap.db
+03:00:22  INFO     [db] 表结构初始化完成
+03:00:22  INFO     
+03:00:22  INFO     ── init_repo ──────────────────────────────────────────
+03:00:22  INFO     调用 init_repo("C:\Users\caoye04\Desktop\repo_4_codemap\minizip-ng")
+03:00:22  INFO     返回 repo_id = 1
+03:00:22  INFO     
+03:00:22  INFO     ┌── Repo 层级信息 [init_repo 完成后]
+03:00:22  INFO     │  id       : 1
+03:00:22  INFO     │  name     : minizip-ng
+03:00:22  INFO     │  path     : C:\Users\caoye04\Desktop\repo_4_codemap\minizip-ng
+03:00:22  INFO     │  language : 尚未分析
+03:00:22  INFO     └──────────────────────────────────────────────────
+03:00:22  INFO     
+03:00:22  INFO     ────────────────────────────────────────────────────────────────────
+03:00:22  INFO     ▶ test_init_repo_basic
+03:00:22  INFO     ────────────────────────────────────────────────────────────────────
+03:00:22  INFO     断言通过：repo_id 正整数 / name 正确 / path 绝对 / language=NULL ✓
+03:00:22  INFO     ◀ test_init_repo_basic  完成
+03:00:22  INFO     
+03:00:22  INFO     ────────────────────────────────────────────────────────────────────
+03:00:22  INFO     ▶ test_analyze_repo_language
+03:00:22  INFO     ────────────────────────────────────────────────────────────────────
+03:00:22  INFO     调用 analyze_repo_language(repo_id=1)
+03:00:22  INFO     
+03:00:22  INFO     ┌── Repo 层级信息 [analyze_repo_language 完成后]
+03:00:22  INFO     │  id       : 1
+03:00:22  INFO     │  name     : minizip-ng
+03:00:22  INFO     │  path     : C:\Users\caoye04\Desktop\repo_4_codemap\minizip-ng
+03:00:22  INFO     │  主语言   : C
+03:00:22  INFO     │  文件总量 :      901,620 bytes（已识别扩展名，不含忽略目录）
+03:00:22  INFO     │  语言分布 : （共 5 种，按字节数降序）
+03:00:22  INFO     │    C                      71.19%       641,903 bytes  ███████████████████████████████████
+03:00:22  INFO     │    Markdown               17.09%       154,114 bytes  ████████
+03:00:22  INFO     │    C++                     5.92%        53,404 bytes  ██
+03:00:22  INFO     │    CMake                   5.76%        51,969 bytes  ██
+03:00:22  INFO     │    YAML                    0.03%           230 bytes  
+03:00:22  INFO     └──────────────────────────────────────────────────
+03:00:22  INFO     断言通过：结构 / 主语言(C) / 排序 / 占比 / DB持久化 ✓
+03:00:22  INFO     ◀ test_analyze_repo_language  完成
