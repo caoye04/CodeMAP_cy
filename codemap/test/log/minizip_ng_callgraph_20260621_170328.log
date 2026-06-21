@@ -1,0 +1,16 @@
+17:03:28  INFO     ======================================================================
+17:03:28  INFO     minizip-ng  build_callgraph + analyze_func_callgraph 集成测试
+17:03:28  INFO     仓库路径 : C:\Users\caoye04\Desktop\repo_4_codemap\minizip-ng
+17:03:28  INFO     日志文件 : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\test\log\minizip_ng_callgraph_20260621_170328.log
+17:03:28  INFO     ======================================================================
+17:03:28  INFO     [db] 测试数据库：C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\data\test_db\db_minizip-ng_cg_20260621_1703.db
+17:03:28  INFO     ── 前置 [1/6]：init_repo
+17:03:28  INFO     repo_id = 1
+17:03:28  INFO     ── 前置 [2/6]：analyze_repo_language
+17:03:28  INFO     主语言：C
+17:03:28  INFO     ── 前置 [3/6]：analyze_repo_area（需 LLM）
+17:03:34  INFO     
+17:03:34  INFO     ──────────────────────────────────────────────────────────────────────
+17:03:34  INFO     ▶ test_missing_callgraph_file_raises
+17:03:34  INFO     断言通过：不存在的调用图文件抛出 ValueError ✓
+17:03:34  INFO     ◀ test_missing_callgraph_file_raises  完成

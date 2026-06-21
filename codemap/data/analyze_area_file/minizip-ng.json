@@ -9,7 +9,7 @@
   "areas": [
     {
       "area_id": 1,
-      "area_name": "core_zip_library",
+      "area_name": "core_library",
       "area_path": ".",
       "file_count": 50,
       "files": [
@@ -266,9 +266,9 @@
       ]
     },
     {
-      "area_id": 3,
+      "area_id": 2,
       "area_name": "build_system",
-      "area_path": "cmake/",
+      "area_path": "cmake",
       "file_count": 2,
       "files": [
         {
@@ -284,9 +284,9 @@
       ]
     },
     {
-      "area_id": 2,
+      "area_id": 3,
       "area_name": "compatibility_layer",
-      "area_path": "compat/",
+      "area_path": "compat",
       "file_count": 7,
       "files": [
         {
@@ -329,7 +329,7 @@
     {
       "area_id": 4,
       "area_name": "documentation",
-      "area_path": "doc/",
+      "area_path": "doc",
       "file_count": 17,
       "files": [
         {
@@ -422,7 +422,7 @@
     {
       "area_id": 5,
       "area_name": "testing",
-      "area_path": "test/",
+      "area_path": "test",
       "file_count": 16,
       "files": [
         {

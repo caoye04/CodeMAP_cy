@@ -6,91 +6,67 @@
   "llm_raw": {
     "areas": [
       {
-        "name": "core_zip_library",
+        "name": "core_library",
         "path": ".",
-        "rationale": "此区域包含Minizip-ng库的核心ZIP文件操作逻辑，如ZIP归档的创建、读取和写入。它是库功能的基础。",
-        "brief": "核心ZIP文件操作库。"
-      },
-      {
-        "name": "stream_compression",
-        "path": ".",
-        "rationale": "此区域负责处理数据流和各种压缩/解压缩算法的集成，例如Zlib、Bzip2、LZMA和Zstd。它提供了数据处理的灵活性和扩展性。",
-        "brief": "数据流和多种压缩/解压缩算法管理。"
-      },
-      {
-        "name": "cryptography",
-        "path": ".",
-        "rationale": "此区域封装了ZIP文件的加密和解密功能，支持多种加密标准和平台特定的实现。它确保了数据传输和存储的安全性。",
-        "brief": "ZIP文件加密和解密功能。"
-      },
-      {
-        "name": "os_abstraction",
-        "path": ".",
-        "rationale": "此区域提供了操作系统相关的抽象层，封装了文件I/O、路径处理等底层操作，以实现库的跨平台兼容性。",
-        "brief": "跨平台操作系统抽象层。"
-      },
-      {
-        "name": "utilities_examples",
-        "path": ".",
-        "rationale": "此区域包含使用Minizip-ng库的示例程序或小型工具（如minigzip, minizip），用于演示库的基本用法和功能。",
-        "brief": "库的使用示例和小型工具。"
-      },
-      {
-        "name": "compatibility_layer",
-        "path": "compat/",
-        "rationale": "此区域提供了与旧版Minizip API的兼容层，方便现有项目迁移或在特定场景下使用旧接口。",
-        "brief": "与旧版Minizip API的兼容层。"
+        "rationale": "该区域包含minizip-ng库的核心实现，包括ZIP文件操作、流处理、加密功能以及操作系统抽象层。它是整个项目的基础。",
+        "brief": "minizip-ng库的核心实现，提供ZIP文件操作、流处理和加密功能。"
       },
       {
         "name": "build_system",
-        "path": "cmake/",
-        "rationale": "此区域包含用于编译和构建项目的CMake脚本和配置，管理项目依赖和生成构建文件。",
-        "brief": "项目的编译和构建配置。"
+        "path": "cmake",
+        "rationale": "此目录包含用于配置和构建项目的CMake脚本和模块，独立于核心库代码。",
+        "brief": "项目的构建系统配置和辅助脚本。"
+      },
+      {
+        "name": "compatibility_layer",
+        "path": "compat",
+        "rationale": "该区域提供与旧版Minizip库兼容的API和实现，方便现有项目迁移，是独立的功能适配层。",
+        "brief": "为旧版Minizip提供兼容性接口。"
       },
       {
         "name": "documentation",
-        "path": "doc/",
-        "rationale": "此区域存放项目的所有文档，包括API说明、使用指南和技术细节，帮助用户理解和使用库。",
-        "brief": "项目官方文档和技术说明。"
+        "path": "doc",
+        "rationale": "此目录集中存放所有用户和开发者文档，包括API说明、概念解释等，与代码实现分离。",
+        "brief": "项目的各类文档和说明。"
       },
       {
         "name": "testing",
-        "path": "test/",
-        "rationale": "此区域包含所有单元测试、集成测试和模糊测试代码及数据，用于验证库的正确性、稳定性和安全性。",
-        "brief": "库的测试代码和测试数据。"
+        "path": "test",
+        "rationale": "该区域包含所有测试用例，包括单元测试、集成测试和模糊测试，用于验证库的功能和稳定性。",
+        "brief": "验证库功能和稳定性的测试套件。"
       }
     ]
   },
   "areas": [
     {
-      "name": "core_zip_library",
+      "name": "core_library",
       "path": ".",
-      "rationale": "此区域包含Minizip-ng库的核心ZIP文件操作逻辑，如ZIP归档的创建、读取和写入。它是库功能的基础。",
-      "brief": "核心ZIP文件操作库。"
-    },
-    {
-      "name": "compatibility_layer",
-      "path": "compat/",
-      "rationale": "此区域提供了与旧版Minizip API的兼容层，方便现有项目迁移或在特定场景下使用旧接口。",
-      "brief": "与旧版Minizip API的兼容层。"
+      "rationale": "该区域包含minizip-ng库的核心实现，包括ZIP文件操作、流处理、加密功能以及操作系统抽象层。它是整个项目的基础。",
+      "brief": "minizip-ng库的核心实现，提供ZIP文件操作、流处理和加密功能。"
     },
     {
       "name": "build_system",
-      "path": "cmake/",
-      "rationale": "此区域包含用于编译和构建项目的CMake脚本和配置，管理项目依赖和生成构建文件。",
-      "brief": "项目的编译和构建配置。"
+      "path": "cmake",
+      "rationale": "此目录包含用于配置和构建项目的CMake脚本和模块，独立于核心库代码。",
+      "brief": "项目的构建系统配置和辅助脚本。"
+    },
+    {
+      "name": "compatibility_layer",
+      "path": "compat",
+      "rationale": "该区域提供与旧版Minizip库兼容的API和实现，方便现有项目迁移，是独立的功能适配层。",
+      "brief": "为旧版Minizip提供兼容性接口。"
     },
     {
       "name": "documentation",
-      "path": "doc/",
-      "rationale": "此区域存放项目的所有文档，包括API说明、使用指南和技术细节，帮助用户理解和使用库。",
-      "brief": "项目官方文档和技术说明。"
+      "path": "doc",
+      "rationale": "此目录集中存放所有用户和开发者文档，包括API说明、概念解释等，与代码实现分离。",
+      "brief": "项目的各类文档和说明。"
     },
     {
       "name": "testing",
-      "path": "test/",
-      "rationale": "此区域包含所有单元测试、集成测试和模糊测试代码及数据，用于验证库的正确性、稳定性和安全性。",
-      "brief": "库的测试代码和测试数据。"
+      "path": "test",
+      "rationale": "该区域包含所有测试用例，包括单元测试、集成测试和模糊测试，用于验证库的功能和稳定性。",
+      "brief": "验证库功能和稳定性的测试套件。"
     }
   ]
 }
