@@ -1,0 +1,10 @@
+02:53:43  INFO     ======================================================================
+02:53:43  INFO     minizip-ng  全量构建  Step 0-7
+02:53:43  INFO     仓库  : C:\Users\caoye04\Desktop\repo_4_codemap\minizip-ng
+02:53:43  INFO     DB    : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\data\test_db\db_minizip-ng_main.db
+02:53:43  INFO     日志  : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\test\log\mainbuild_20260622_025343.log
+02:53:43  INFO     Step7 并行度 : MAX_STEP7_WORKERS = 3
+02:53:43  INFO     ======================================================================
+02:53:43  DEBUG    [WAL] journal_mode = wal
+02:53:43  INFO     ▶ Step 0  init_repo
+02:53:43  INFO     ◀ Step 0  init_repo  耗时 0s

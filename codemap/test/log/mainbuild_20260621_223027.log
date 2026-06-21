@@ -1,0 +1,47 @@
+22:30:27  INFO     ======================================================================
+22:30:27  INFO     minizip-ng  全量构建  Step 0-7
+22:30:27  INFO     仓库  : C:\Users\caoye04\Desktop\repo_4_codemap\minizip-ng
+22:30:27  INFO     DB    : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\data\test_db\db_minizip-ng_main.db
+22:30:27  INFO     日志  : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\test\log\mainbuild_20260621_223027.log
+22:30:27  INFO     Step7 并行度 : MAX_STEP7_WORKERS = 3
+22:30:27  INFO     ======================================================================
+22:30:27  DEBUG    [WAL] journal_mode = wal
+22:30:27  INFO     ▶ Step 0  init_repo
+22:30:27  INFO     ◀ Step 0  init_repo  耗时 0s
+22:30:27  INFO       repo_id = 1
+22:30:27  INFO     ▶ Step 1  analyze_repo_language
+22:30:27  INFO     ◀ Step 1  analyze_repo_language  耗时 0s
+22:30:27  INFO       主语言 : C
+22:30:27  INFO     ▶ Step 2  analyze_repo_area  [LLM]
+22:31:29  INFO     ◀ Step 2  analyze_repo_area  [LLM]  耗时 1m 1s
+22:31:29  INFO       area 数 : 5
+22:31:29  INFO     ▶ Step 3  analyze_area_file
+22:31:30  INFO     ◀ Step 3  analyze_area_file  耗时 1s
+22:31:30  INFO       file 数 : 92
+22:31:30  INFO     ▶ Step 4  analyze_file_language + analyze_file_func
+22:31:40  INFO     ◀ Step 4  analyze_file_language + analyze_file_func  耗时 10s
+22:31:40  INFO       func 数 : 771
+22:31:40  INFO     ▶ Step 5  build_callgraph
+22:31:40  INFO     ◀ Step 5  build_callgraph  耗时 0s
+22:31:40  INFO       callgraph : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\data\callgraph\minizip-ng_callgraph.json
+22:31:40  INFO     ▶ Step 6  analyze_func_callgraph
+22:31:47  INFO     ◀ Step 6  analyze_func_callgraph  耗时 6s
+22:31:47  INFO       callgraph 写库 : 771 个函数
+22:31:47  INFO     [func_ids]  C 函数共 707 个（有 callee=552，无 callee=155）
+22:31:47  INFO     ▶ Step 7  precondition / postcondition / exception  [LLM × 3 并行]
+22:31:47  INFO       三路并行启动（workers=3，目标函数=707 个）
+01:43:06  INFO       ✓ precondition     写库=707 个  有数据=627/707  已耗时=11479s
+01:58:11  INFO       ✓ postcondition    写库=707 个  有数据=703/707  已耗时=12384s
+02:36:22  INFO       ✓ exception        写库=707 个  有数据=701/707  已耗时=14675s
+02:36:22  INFO       三路分析全部完成，总耗时 14675.0s
+02:36:22  INFO     ◀ Step 7  precondition / postcondition / exception  [LLM × 3 并行]  耗时 244m 34s
+02:36:22  INFO     
+02:36:22  INFO     ======================================================================
+02:36:22  INFO     构建完成  汇总报告
+02:36:22  INFO       DB       : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\data\test_db\db_minizip-ng_main.db
+02:36:22  INFO       总耗时   : 245m 55s  (14755s)
+02:36:22  INFO       ─── Step 7 覆盖率 ───────────────────────────────────────
+02:36:22  INFO       precondition   : 有数据=627/707 (89%)  平均条数=3.2
+02:36:22  INFO       postcondition  : 有数据=703/707 (99%)  平均条数=4.8
+02:36:22  INFO       exception      : 有数据=701/707 (99%)  平均条数=7.1
+02:36:22  INFO     ======================================================================

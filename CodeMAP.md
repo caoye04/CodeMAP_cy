@@ -37,12 +37,12 @@
 11. **analyze_func_exception**：分析该函数的异常处理，填入对应数据【func:exception】
 
 1. **analyze_func_description**：agent实现，提供该函数内容+调用关系+前置条件+后置条件+异常处理，以及给一个get_func_context的工具调用结构，可以agent工具得到调用链里的函数信息；让agent给出该函数的自然语言描述：该函数功能+函数分析+函数安全分析+开发者意图分析等，最后填入对应数据【func:description】
-2. **analyze_file_funclist_description**：通过提供file的funclist，将每个func的description变成简短的一两句话存入对应数据【file:funclist】
+2. **analyze_file_funclist_brief**：通过提供file的funclist，将每个func的description变成简短的一两句话存入对应数据【file:funclist】
 3. **analyze_file_description**：给llm提供file在area里的文件组织架构、文件信息、其中函数所有的description，得到对文件的自然语言描述：文件功能+文件定位+开发者意图分析，最后填入对应数据【file:description】
-4. **analyze_area_filelist_description**：通过提供area的filelist，将每个file的description变成简短的一两句话存入对应数据【area:filelist】
+4. **analyze_area_filelist_brief**：通过提供area的filelist，将每个file的description变成简短的一两句话存入对应数据【area:filelist】
 5. **analyze_area_description**：给llm提供area的在仓库中路径及分层依据+area里的文件组织架构、其中file所有的description，得到对area的自然语言描述：area功能+area定位+开发者意图分析，最后填入对应数据【area:description】
-6. **analyze_repo_arealist_description**：通过提供repo的arealist，每个area的description变成简短的一两句话存入对应数据【repo:arealist】
-7. **analyze_area_description**：给llm提供仓库的文件组织结构、分层结构、仓库相关信息、仓库里可参考的文本内容、仓库的所有area的description，得到对仓库的自然语言描述：仓库功能+开发者意图分析，最后填入对应数据【repo:description】
+6. **analyze_repo_arealist_brief**：通过提供repo的arealist，每个area的description变成简短的一两句话存入对应数据【repo:arealist】
+7. **analyze_repo_description**：给llm提供仓库的文件组织结构、分层结构、仓库相关信息、仓库里可参考的文本内容、仓库的所有area的description，得到对仓库的自然语言描述：仓库功能+开发者意图分析，最后填入对应数据【repo:description】
 8. **build_codemap**：实现CodeMAP，即将上述流程串起来
 
 ### CodeMAP外部接口实现
@@ -5395,3 +5395,13 @@ class TestAnalyzeFuncCallgraph:
 ```
 
 ### Step7：`analyze_func_precondition`和`analyze_func_postcondition`和`analyze_func_exception`实现
+
+实现思路：
+
+analyze_func_precondition：读取函数源码，SA 扫描函数入口段的 guard 语句（空指针检查、范围断言、状态标志位检查等），提取结构化特征后连同函数本身、函数签名、参数列表一起送给 LLM，让 LLM 综合 SA 结果和对代码语义的理解，输出若干条自然语言描述的前置条件，最终以字符串列表形式写入 `func.precondition`。
+
+analyze_func_postcondition：读取函数源码，SA 扫描所有 return 路径的返回值语义、对指针参数的写回操作、内存分配/IO 等副作用，提取结构化特征后连同函数本身、函数签名、io 字段一起送给 LLM，让 LLM 综合 SA 结果输出若干条自然语言描述的后置保证（返回值含义、状态变更、副作用），最终以字符串列表形式写入 `func.postcondition`。
+
+analyze_func_exception：读取函数源码，SA 扫描错误处理模式（错误码检查与传播、errno 使用、try/catch、错误路径上未释放的资源等），提取结构化特征后送给 LLM，让 LLM 综合 函数本身和SA 结果输出若干条自然语言描述的异常与错误处理情况（包括已处理路径和潜在未处理风险），最终以字符串列表形式写入 `func.exception`。
+
+三步最终存储结构统一为 `["...", "...", "..."]`，纯自然语言条目列表，无嵌套字段。

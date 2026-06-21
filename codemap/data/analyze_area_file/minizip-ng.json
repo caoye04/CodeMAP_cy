@@ -9,7 +9,7 @@
   "areas": [
     {
       "area_id": 1,
-      "area_name": "core_library",
+      "area_name": "project_root_configuration",
       "area_path": ".",
       "file_count": 50,
       "files": [
@@ -267,7 +267,7 @@
     },
     {
       "area_id": 2,
-      "area_name": "build_system",
+      "area_name": "build_system_helpers",
       "area_path": "cmake",
       "file_count": 2,
       "files": [
@@ -421,7 +421,7 @@
     },
     {
       "area_id": 5,
-      "area_name": "testing",
+      "area_name": "test_suite",
       "area_path": "test",
       "file_count": 16,
       "files": [
