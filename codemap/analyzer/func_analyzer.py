@@ -1090,3 +1090,238 @@ def analyze_func_exception(
         skip_if_exists=skip_if_exists,
         languages=languages,
     )
+
+# ────────────────────────────────────────────────
+# 以下为 Step 12 新增，依赖已有的 _read_func_source / _format_params 等工具函数
+
+import time as _time
+from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+# LLM 重试配置（Step 12 统一用 5 次）
+_DESC_MAX_RETRIES  = 5
+_DESC_RETRY_DELAYS = (2, 5, 10, 20, 40)   # 第1-5次失败后等待秒数
+_DESC_MAX_SRC_CHARS = 4000                 # prompt 中源码最大字符数
+
+
+def _retry(fn, label: str = "", max_retries: int = _DESC_MAX_RETRIES):
+    """通用重试包装器，失败后按指数退避等待，最多 max_retries 次。"""
+    last_exc = None
+    for i in range(max_retries):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if i < max_retries - 1:
+                wait = _DESC_RETRY_DELAYS[min(i, len(_DESC_RETRY_DELAYS) - 1)]
+                print(
+                    f"  ↻ 第{i+1}/{max_retries}次失败{' (' + label + ')' if label else ''}："
+                    f"{exc}，{wait}s 后重试…"
+                )
+                _time.sleep(wait)
+    raise RuntimeError(
+        f"已重试 {max_retries} 次仍失败{' (' + label + ')' if label else ''}。"
+        f"最后异常：{last_exc}"
+    )
+
+
+def _describe_one_func(
+    fn_rec:    dict,
+    file_map:  dict,
+    repo_id:   int,
+    db_path:   str,
+    repo_path: str,
+) -> tuple[int, str]:
+    """
+    处理单个函数的描述生成（含源码读取 + Agent 调用）。
+    返回 (func_id, description_text)。
+    供 ThreadPoolExecutor 调用。
+    """
+    from llm.agent import run_func_description_agent
+
+    func_id   = fn_rec["id"]
+    func_name = fn_rec["name"]
+
+    # 取文件语言
+    file_rec  = file_map.get(fn_rec.get("file_id"))
+    language  = (file_rec or {}).get("language", "C")
+
+    # 解析 place
+    place = fn_rec.get("place") or {}
+    if isinstance(place, str):
+        try:
+            import json as _j; place = _j.loads(place)
+        except Exception:
+            place = {}
+
+    rel_path   = place.get("file_path", "")
+    start_line = int(place.get("start_line", 0))
+    end_line   = int(place.get("end_line", 0))
+
+    if not rel_path or start_line <= 0:
+        return func_id, ""
+
+    # 读取源码
+    source = _read_func_source(repo_path, rel_path, start_line, end_line)
+    if source is None:
+        return func_id, ""
+
+    if len(source) > _DESC_MAX_SRC_CHARS:
+        source = source[:_DESC_MAX_SRC_CHARS] + f"\n...(源码截断，原长 {len(source)} 字符)"
+
+    # 将语言信息注入 func_rec（agent.py 需要）
+    fn_rec_copy = dict(fn_rec)
+    fn_rec_copy["_language"] = language
+
+    label = f"func_id={func_id} {func_name}"
+
+    def _run():
+        return run_func_description_agent(
+            func_rec   = fn_rec_copy,
+            repo_id    = repo_id,
+            db_path    = db_path,
+            repo_path  = repo_path,
+            source_code= source,
+        )
+
+    desc = _retry(_run, label=label, max_retries=_DESC_MAX_RETRIES)
+    return func_id, desc
+
+
+def analyze_func_description(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    func_ids: Optional[list[int]] = None,
+    skip_if_exists: bool = True,
+    languages: Optional[list[str]] = None,
+    max_workers: int = 10,
+) -> dict[int, str]:
+    """
+    Agent 分析仓库内函数，生成自然语言描述，写入 func.description。
+
+    并行策略
+    --------
+    每个函数独立运行 Agent（LLM 网络 I/O 为主，GIL 在阻塞时释放），
+    ThreadPoolExecutor(max_workers) 实现真并发，默认 10 路。
+
+    重试策略
+    --------
+    每个函数最多重试 5 次（含首次），失败后写入空字符串并记录错误。
+
+    Parameters
+    ----------
+    repo_id         : 目标仓库 id
+    db_path         : SQLite 路径；None 使用 config.DB_PATH
+    func_ids        : 指定函数 id 列表；None 处理全部
+    skip_if_exists  : True = 跳过已有 description 的函数（增量处理）
+    languages       : 语言白名单；None 不过滤（如 ['C', 'C++']）
+    max_workers     : 并发线程数，默认 10
+
+    Returns
+    -------
+    dict[int, str]  {func_id → description_text}
+    """
+    import config as _cfg
+
+    _db = db_path or DB_PATH
+
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_func_description] repo_id={repo_id} 不存在。")
+
+    repo_path = repo["path"]
+    repo_name = repo["name"]
+    print(f"[analyze_func_description] 目标仓库：{repo_name}（{repo_path}）")
+
+    # ── 构建文件语言映射 ──────────────────────────────────────────
+    all_files = FileDB.list_by_repo(repo_id, db_path=_db)
+    file_map  = {f["id"]: f for f in all_files}
+
+    # ── 过滤待处理函数 ────────────────────────────────────────────
+    all_funcs = FuncDB.list_by_repo(repo_id, db_path=_db)
+
+    if func_ids is not None:
+        id_set    = set(func_ids)
+        all_funcs = [f for f in all_funcs if f["id"] in id_set]
+
+    if languages:
+        lang_set  = set(languages)
+        all_funcs = [
+            f for f in all_funcs
+            if (file_map.get(f.get("file_id")) or {}).get("language", "Unknown")
+               in lang_set
+        ]
+
+    if skip_if_exists:
+        before    = len(all_funcs)
+        all_funcs = [f for f in all_funcs if not f.get("description")]
+        print(
+            f"[analyze_func_description] 跳过已有描述：{before - len(all_funcs)} 个"
+        )
+
+    total = len(all_funcs)
+    print(
+        f"[analyze_func_description] 待处理函数：{total} 个"
+        f"（并发度 {max_workers}，模型 {_cfg.LLM_MODEL}）"
+    )
+
+    if total == 0:
+        print("[analyze_func_description] 无需处理，退出。")
+        return {}
+
+    result:   dict[int, str] = {}
+    success   = error = 0
+    t0 = _time.time()
+
+    # ── 并行处理 ─────────────────────────────────────────────────
+    with ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="func_desc"
+    ) as pool:
+        future_to_fid = {
+            pool.submit(
+                _describe_one_func,
+                fn_rec, file_map, repo_id, _db, repo_path,
+            ): fn_rec["id"]
+            for fn_rec in all_funcs
+        }
+
+        done_count = 0
+        for future in _as_completed(future_to_fid):
+            fid       = future_to_fid[future]
+            done_count += 1
+
+            try:
+                fid_out, desc = future.result()
+                result[fid_out] = desc
+                if desc:
+                    FuncDB.update(fid_out, db_path=_db, description=desc)
+                    success += 1
+                else:
+                    error += 1
+            except Exception as exc:
+                print(
+                    f"[analyze_func_description]   ✗ func_id={fid} 最终失败：{exc}"
+                )
+                result[fid] = ""
+                try:
+                    FuncDB.update(fid, db_path=_db, description="")
+                except Exception:
+                    pass
+                error += 1
+
+            # 进度日志
+            if done_count % 20 == 0 or done_count == total:
+                elapsed = _time.time() - t0
+                print(
+                    f"[analyze_func_description]   进度 {done_count}/{total}"
+                    f"  ✓={success}  ✗={error}"
+                    f"  耗时={elapsed:.0f}s"
+                )
+
+    print(
+        f"[analyze_func_description] ✓ 完成：\n"
+        f"  总处理  : {total}\n"
+        f"  写库成功 : {success}\n"
+        f"  失败    : {error}\n"
+        f"  总耗时  : {_time.time() - t0:.0f}s"
+    )
+    return result

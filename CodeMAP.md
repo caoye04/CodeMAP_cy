@@ -5396,12 +5396,3559 @@ class TestAnalyzeFuncCallgraph:
 
 ### Step7：`analyze_func_precondition`和`analyze_func_postcondition`和`analyze_func_exception`实现
 
-实现思路：
+`analyzer/func_analyzer.py`
 
-analyze_func_precondition：读取函数源码，SA 扫描函数入口段的 guard 语句（空指针检查、范围断言、状态标志位检查等），提取结构化特征后连同函数本身、函数签名、参数列表一起送给 LLM，让 LLM 综合 SA 结果和对代码语义的理解，输出若干条自然语言描述的前置条件，最终以字符串列表形式写入 `func.precondition`。
+```
+"""
+analyzer/func_analyzer.py
+CodeMAP 函数层分析器（Step 7）
 
-analyze_func_postcondition：读取函数源码，SA 扫描所有 return 路径的返回值语义、对指针参数的写回操作、内存分配/IO 等副作用，提取结构化特征后连同函数本身、函数签名、io 字段一起送给 LLM，让 LLM 综合 SA 结果输出若干条自然语言描述的后置保证（返回值含义、状态变更、副作用），最终以字符串列表形式写入 `func.postcondition`。
+实现：
+  - analyze_func_precondition  : SA + LLM 分析函数前置条件，写入 func:precondition
+  - analyze_func_postcondition : SA + LLM 分析函数后置条件，写入 func:postcondition
+  - analyze_func_exception     : SA + LLM 分析函数异常处理，写入 func:exception
 
-analyze_func_exception：读取函数源码，SA 扫描错误处理模式（错误码检查与传播、errno 使用、try/catch、错误路径上未释放的资源等），提取结构化特征后送给 LLM，让 LLM 综合 函数本身和SA 结果输出若干条自然语言描述的异常与错误处理情况（包括已处理路径和潜在未处理风险），最终以字符串列表形式写入 `func.exception`。
+存储格式：["自然语言条目1", "条目2", ...] 纯字符串列表，无嵌套。
 
-三步最终存储结构统一为 `["...", "...", "..."]`，纯自然语言条目列表，无嵌套字段。
+SA 策略：
+  C / C++ / Objective-C → tree-sitter AST + 正则双重提取
+  Python                → ast 模块 + 正则双重提取
+  其他语言               → 正则兜底
+"""
+
+import ast
+import json as _json
+import os
+import re
+import sys
+import time                          # ← 新增：重试等待
+from typing import Optional
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from db.dao import RepoDB, FileDB, FuncDB
+from config import DB_PATH
+
+# ------------------------------------------------------------------
+#  tree-sitter 可用性检测
+# ------------------------------------------------------------------
+try:
+    from tree_sitter_languages import get_parser as _ts_get_parser
+    _ts_get_parser('c')
+    _TREE_SITTER_OK = True
+except Exception:
+    _TREE_SITTER_OK = False
+
+# 单函数源码大小上限（超出跳过 SA，仍走 LLM 截断版）
+_MAX_FUNC_BYTES = 512 * 1024   # 512 KB
+# LLM 提示中函数源码的最大字符数
+_MAX_SOURCE_IN_PROMPT = 4000
+
+# LLM 调用重试策略
+_LLM_MAX_RETRIES   = 3          # 最多重试次数（含第 1 次，共最多 3 次）
+_LLM_RETRY_DELAYS  = [2, 5, 10] # 第 1/2/3 次失败后等待的秒数
+
+# ==================================================================
+# §1  正则常量
+# ==================================================================
+
+# C/C++：空指针 / 零值 guard 条件
+_RE_C_NULL_GUARD = re.compile(
+    r'\bif\s*\(([^{;\n]*?'
+    r'(?:==\s*(?:NULL|Z_NULL|nullptr|0)\b|'
+    r'!=\s*(?:NULL|Z_NULL|nullptr)\b|'
+    r'!\s*[a-zA-Z_]\w*)'
+    r'[^{;\n]*?)\)',
+    re.MULTILINE,
+)
+
+# C/C++：数值范围 guard 条件
+_RE_C_RANGE_GUARD = re.compile(
+    r'\bif\s*\(([^{;\n]*?(?:[<>]=?\s*\d|[<>]=?\s*[A-Z_]+_(?:MAX|MIN|SIZE|LEN))'
+    r'[^{;\n]*?)\)',
+    re.MULTILINE,
+)
+
+# assert / 断言宏
+_RE_ASSERT = re.compile(
+    r'\b((?:MZ_ASSERT|ZASSERT|Z_ASSERT|assert|ASSERT|VERIFY|'
+    r'MINIZIP_ASSERT|ZLIB_INTERNAL)\s*\((?:[^()]*|\([^()]*\))*\))\s*;',
+    re.MULTILINE,
+)
+
+# return 语句（含返回值）
+_RE_RETURN = re.compile(r'\breturn\s+([^;{]+?)\s*;', re.MULTILINE)
+
+# 解引用赋值（输出参数写回）：*param = expr
+_RE_DEREF_ASSIGN = re.compile(
+    r'\*\s*([a-zA-Z_]\w*(?:\s*->\s*[a-zA-Z_]\w*)*)\s*=\s*([^;]+)\s*;',
+    re.MULTILINE,
+)
+
+# 内存分配调用
+_RE_ALLOC_CALL = re.compile(
+    r'\b(malloc|calloc|realloc|ZALLOC|MZ_ALLOC|zmalloc|zalloc|'
+    r'ALLOC|mz_stream_alloc|HeapAlloc|VirtualAlloc|new\b)\s*[(<]',
+    re.MULTILINE,
+)
+
+# goto 语句
+_RE_GOTO = re.compile(r'\bgoto\s+([a-zA-Z_]\w*)\s*;', re.MULTILINE)
+
+# errno 赋值
+_RE_ERRNO = re.compile(r'\berrno\s*=\s*([A-Z_]\w*)\s*;', re.MULTILINE)
+
+# 错误码符号识别（用于判断 return 值是否为错误码）
+_RE_ERROR_CODE = re.compile(
+    r'\b(?:'
+    r'Z_(?:STREAM|MEM|BUF|VERSION|DATA|ERRNO)_ERROR|'
+    r'MZ_(?:STREAM|MEM|OPEN|CLOSE|WRITE|READ|HASH|SUPPORT|PARAM|SIGN|CRC|'
+    r'EXIST|PASSWORD|INTERNAL)_ERROR|'
+    r'MZ_OK|Z_OK|'
+    r'EOF|EINVAL|ENOMEM|ENOENT|EACCES|EPERM|EBADF|EIO|'
+    r'-1|NULL|nullptr|false|FALSE'
+    r')\b',
+)
+
+# 已知可能失败但返回值常被忽略的函数（用于检测 unchecked call）
+_RISKY_UNCHECKED = frozenset({
+    'fwrite', 'fread', 'write', 'read', 'fflush', 'fclose',
+    'mz_stream_write', 'mz_stream_read', 'mz_stream_flush',
+    'send', 'recv', 'sendto', 'recvfrom',
+})
+
+
+# ==================================================================
+# §2  工具函数
+# ==================================================================
+
+def _read_func_source(
+    repo_path: str,
+    rel_path: str,
+    start_line: int,
+    end_line: int,
+) -> Optional[str]:
+    """
+    按行范围读取函数源码。
+
+    Returns
+    -------
+    str | None  失败（文件不存在、编码问题、超大文件）时返回 None
+    """
+    abs_path = os.path.join(repo_path, rel_path)
+    if not os.path.isfile(abs_path):
+        return None
+    try:
+        if os.path.getsize(abs_path) > _MAX_FUNC_BYTES * 10:
+            return None
+    except OSError:
+        return None
+
+    for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'gbk'):
+        try:
+            with open(abs_path, 'r', encoding=enc, errors='strict') as f:
+                lines = f.readlines()
+            s = max(0, start_line - 1)
+            e = min(len(lines), end_line)
+            return ''.join(lines[s:e])
+        except (UnicodeDecodeError, ValueError):
+            continue
+        except OSError:
+            return None
+    return None
+
+
+def _format_params(params) -> str:
+    """将 io.params 列表格式化为可读字符串。"""
+    if not params or not isinstance(params, list):
+        return '（无参数）'
+    parts = []
+    for p in params:
+        t = str(p.get('type', '') or '').strip()
+        n = str(p.get('name', '') or '').strip()
+        if t and n:
+            parts.append(f'{t} {n}')
+        elif t:
+            parts.append(t)
+        elif n:
+            parts.append(n)
+    return ', '.join(parts) if parts else '（无参数）'
+
+
+def _parse_llm_list(raw) -> list[str]:
+    """
+    从 LLM 返回的 dict/list 中提取字符串列表。
+    容错：支持 {"items": [...]} / 直接 list / {"conditions": [...]} 等。
+    """
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if x and str(x).strip()]
+
+    if isinstance(raw, dict):
+        for key in ('items', 'conditions', 'postconditions',
+                    'preconditions', 'exceptions', 'results', 'list'):
+            val = raw.get(key)
+            if isinstance(val, list):
+                return [str(x).strip() for x in val if x and str(x).strip()]
+        # 回退：取第一个 list 类型的 value
+        for val in raw.values():
+            if isinstance(val, list):
+                return [str(x).strip() for x in val if x and str(x).strip()]
+
+    return []
+
+
+# ==================================================================
+# §3  tree-sitter 工具（C/C++ 专用）
+# ==================================================================
+
+def _ts_text(node, src: bytes) -> str:
+    return src[node.start_byte:node.end_byte].decode('utf-8', errors='replace')
+
+
+def _find_all_ts_nodes(root, wanted: set) -> list:
+    """DFS 收集所有指定类型的 tree-sitter 节点。"""
+    result, stack = [], [root]
+    while stack:
+        node = stack.pop()
+        if node.type in wanted:
+            result.append(node)
+        for child in reversed(node.children):
+            stack.append(child)
+    return result
+
+
+def _ts_get_func_body(source: str, func_name: str, language: str):
+    """
+    用 tree-sitter 找到目标函数体节点。
+    返回 (body_node, src_bytes) 或 (None, None)。
+    """
+    if not _TREE_SITTER_OK:
+        return None, None
+
+    ts_name   = 'cpp' if language in ('C++', 'Objective-C') else 'c'
+    src_bytes = source.encode('utf-8', errors='replace')
+    try:
+        parser = _ts_get_parser(ts_name)
+        tree   = parser.parse(src_bytes)
+    except Exception:
+        return None, None
+
+    for fn_node in _find_all_ts_nodes(tree.root_node, {'function_definition'}):
+        body = fn_node.child_by_field_name('body')
+        if body is None:
+            continue
+        decl = fn_node.child_by_field_name('declarator')
+        if decl is None:
+            continue
+        # 从 declarator 文本中提取函数名（取 '(' 之前最后一个标识符）
+        decl_text   = _ts_text(decl, src_bytes)
+        before_paren = decl_text.split('(')[0]
+        words = re.findall(r'[a-zA-Z_]\w*', before_paren)
+        if words and words[-1] == func_name:
+            return body, src_bytes
+
+    return None, None
+
+
+def _ts_is_early_exit(node, src: bytes) -> bool:
+    """判断一个语句节点是否构成早退（包含 return / goto）。"""
+    text = _ts_text(node, src)
+    return bool(re.search(r'\b(?:return|goto)\b', text))
+
+
+# ==================================================================
+# §4  C/C++ tree-sitter SA
+# ==================================================================
+
+def _sa_c_precondition(source: str, func_name: str, language: str) -> dict:
+    """
+    C/C++ 前置条件 SA（tree-sitter 优先，正则补充）。
+
+    策略：
+      - 扫描函数体前 40% 的直接子语句（最少 6 条）
+      - 收集有早退语义的 if_statement（guard）
+      - 收集 assert / MZ_ASSERT 等断言调用
+      - 按条件类型分类（null check / range / state / other）
+    """
+    body, src_bytes = _ts_get_func_body(source, func_name, language)
+
+    guard_conditions: list[str] = []
+    asserts:          list[str] = []
+    state_checks:     list[str] = []
+    raw_guards:       list[str] = []
+
+    if body is not None:
+        children = [c for c in body.children
+                    if c.type not in ('{', '}', 'comment')]
+        scan_n = max(6, int(len(children) * 0.40))
+
+        for stmt in children[:scan_n]:
+            stmt_text = _ts_text(stmt, src_bytes).strip()
+
+            # ── if_statement 守卫 ─────────────────────────────────
+            if stmt.type == 'if_statement':
+                cond_node = stmt.child_by_field_name('condition')
+                if cond_node is None:
+                    continue
+                cond = _ts_text(cond_node, src_bytes).strip()
+
+                if _ts_is_early_exit(stmt, src_bytes):
+                    # 分类
+                    if re.search(
+                        r'==\s*(?:NULL|Z_NULL|nullptr|0)\b'
+                        r'|!=\s*(?:NULL|Z_NULL|nullptr)\b'
+                        r'|!\s*[a-zA-Z_]',
+                        cond
+                    ):
+                        guard_conditions.append(f'null/zero check: {cond[:120]}')
+                    elif re.search(r'[<>]=?\s*\d', cond):
+                        guard_conditions.append(f'range check: {cond[:120]}')
+                    elif re.search(
+                        r'\b(?:status|state|mode|type|initialized|ready|level|'
+                        r'avail_in|avail_out|next_in|next_out)\b',
+                        cond, re.I
+                    ):
+                        state_checks.append(f'state check: {cond[:120]}')
+                    else:
+                        guard_conditions.append(f'guard: {cond[:120]}')
+
+                    raw_guards.append(stmt_text[:240])
+
+            # ── assert / 断言宏 ───────────────────────────────────
+            elif stmt.type == 'expression_statement':
+                expr_text = stmt_text.rstrip(';')
+                m = re.match(
+                    r'\b((?:assert|MZ_ASSERT|ASSERT|VERIFY|MINIZIP_ASSERT)'
+                    r'\s*\((.+)\))\s*$',
+                    expr_text, re.DOTALL
+                )
+                if m:
+                    asserts.append(m.group(2).strip()[:120])
+
+    # 正则补充（捕捉 tree-sitter 可能遗漏的多行条件）
+    else:
+        for m in _RE_C_NULL_GUARD.finditer(source):
+            cond = m.group(1).strip()[:120]
+            entry = f'null check: {cond}'
+            if entry not in guard_conditions:
+                guard_conditions.append(entry)
+        for m in _RE_C_RANGE_GUARD.finditer(source):
+            cond = m.group(1).strip()[:120]
+            entry = f'range check: {cond}'
+            if entry not in guard_conditions:
+                guard_conditions.append(entry)
+        for m in _RE_ASSERT.finditer(source):
+            entry = m.group(1).strip()[:100]
+            if entry not in asserts:
+                asserts.append(entry)
+
+    result: dict = {}
+    if guard_conditions:
+        result['guard_conditions'] = list(dict.fromkeys(guard_conditions))[:10]
+    if asserts:
+        result['asserts'] = list(dict.fromkeys(asserts))[:6]
+    if state_checks:
+        result['state_checks'] = list(dict.fromkeys(state_checks))[:6]
+    if raw_guards:
+        result['raw_guards'] = raw_guards[:6]
+    return result
+
+
+def _sa_c_postcondition(source: str, func_name: str, language: str) -> dict:
+    """
+    C/C++ 后置条件 SA（tree-sitter 优先）。
+
+    提取：return 值集合、输出参数写回、内存分配、状态字段变更。
+    """
+    body, src_bytes = _ts_get_func_body(source, func_name, language)
+
+    return_values:    list[str] = []
+    output_writes:    list[str] = []
+    alloc_calls:      list[str] = []
+    state_mutations:  list[str] = []
+
+    if body is not None:
+        # return 值
+        for ret in _find_all_ts_nodes(body, {'return_statement'}):
+            ret_text = _ts_text(ret, src_bytes).strip()
+            m = re.match(r'return\s+(.+?)\s*;', ret_text, re.DOTALL)
+            if m:
+                val = re.sub(r'\s+', ' ', m.group(1).strip())[:100]
+                if val and val not in return_values:
+                    return_values.append(val)
+
+        # 赋值表达式
+        for assign in _find_all_ts_nodes(body, {'assignment_expression'}):
+            assign_text = _ts_text(assign, src_bytes).strip()
+
+            # 解引用赋值 (*param = ...)
+            if re.match(r'\*\s*[a-zA-Z_]', assign_text):
+                short = assign_text[:100]
+                if short not in output_writes:
+                    output_writes.append(short)
+
+            # 结构体字段赋值 (ptr->field = ...)
+            elif re.match(r'[a-zA-Z_]\w*\s*->\s*[a-zA-Z_]', assign_text):
+                short = assign_text[:100]
+                if short not in state_mutations and len(state_mutations) < 8:
+                    state_mutations.append(short)
+
+        # 内存分配调用
+        for call in _find_all_ts_nodes(body, {'call_expression'}):
+            call_text = _ts_text(call, src_bytes).strip()
+            if re.match(
+                r'(?:malloc|calloc|realloc|ZALLOC|zmalloc|zalloc|'
+                r'strdup|mz_stream_alloc)\s*\(',
+                call_text
+            ):
+                short = call_text[:80]
+                if short not in alloc_calls:
+                    alloc_calls.append(short)
+
+    else:
+        # 正则兜底
+        for m in _RE_RETURN.finditer(source):
+            val = m.group(1).strip()[:100]
+            if val not in return_values:
+                return_values.append(val)
+        for m in _RE_DEREF_ASSIGN.finditer(source):
+            entry = f'*{m.group(1)} = {m.group(2).strip()}'[:100]
+            if entry not in output_writes:
+                output_writes.append(entry)
+        for m in _RE_ALLOC_CALL.finditer(source):
+            name = m.group(1).strip()
+            if name not in alloc_calls:
+                alloc_calls.append(name)
+
+    result: dict = {}
+    if return_values:
+        result['return_values'] = list(dict.fromkeys(return_values))[:10]
+    if output_writes:
+        result['output_writes'] = output_writes[:6]
+    if alloc_calls:
+        result['allocation_calls'] = alloc_calls[:4]
+    if state_mutations:
+        result['state_mutations'] = state_mutations[:6]
+    return result
+
+
+def _sa_c_exception(source: str, func_name: str, language: str) -> dict:
+    """
+    C/C++ 异常/错误处理 SA（tree-sitter 优先）。
+
+    提取：错误返回值、goto 清理、已检查调用、未检查调用、errno 使用。
+    """
+    body, src_bytes = _ts_get_func_body(source, func_name, language)
+
+    error_returns:     list[str] = []
+    goto_labels:       list[str] = []
+    error_checks:      list[str] = []
+    unchecked_calls:   list[str] = []
+    errno_assignments: list[str] = []
+
+    if body is not None:
+        # 错误返回
+        for ret in _find_all_ts_nodes(body, {'return_statement'}):
+            ret_text = _ts_text(ret, src_bytes).strip()
+            if _RE_ERROR_CODE.search(ret_text):
+                short = ret_text[:120]
+                if short not in error_returns:
+                    error_returns.append(short)
+
+        # goto 语句（通常是错误清理跳转）
+        for goto in _find_all_ts_nodes(body, {'goto_statement'}):
+            label = _ts_text(goto, src_bytes).strip()[:80]
+            if label not in goto_labels:
+                goto_labels.append(label)
+
+        # if 语句中的错误检查模式
+        for if_node in _find_all_ts_nodes(body, {'if_statement'}):
+            cond_node = if_node.child_by_field_name('condition')
+            if cond_node is None:
+                continue
+            cond      = _ts_text(cond_node, src_bytes).strip()
+            conseq    = if_node.child_by_field_name('consequence')
+            if conseq and _ts_is_early_exit(if_node, src_bytes):
+                # 条件中引用常见错误变量
+                if re.search(
+                    r'\b(?:ret|err|status|rc|result|rv|retval|'
+                    r'err_code|error|res)\b.*[!=<>]',
+                    cond
+                ):
+                    entry = f'if ({cond[:80]}) → error exit'
+                    if entry not in error_checks:
+                        error_checks.append(entry)
+
+        # 未检查的高风险调用（expression_statement 且调用名在黑名单中）
+        for expr_stmt in [c for c in body.children
+                          if c.type == 'expression_statement']:
+            expr = _ts_text(expr_stmt, src_bytes).strip().rstrip(';')
+            m = re.match(r'([a-zA-Z_]\w*)\s*\(', expr)
+            if m and m.group(1) in _RISKY_UNCHECKED:
+                short = expr[:100]
+                if short not in unchecked_calls:
+                    unchecked_calls.append(short)
+
+        # errno 赋值
+        for assign in _find_all_ts_nodes(body, {'assignment_expression'}):
+            assign_text = _ts_text(assign, src_bytes).strip()
+            if re.match(r'\berrno\s*=', assign_text):
+                short = assign_text[:80]
+                if short not in errno_assignments:
+                    errno_assignments.append(short)
+
+    else:
+        # 正则兜底
+        for m in _RE_RETURN.finditer(source):
+            val = m.group(1).strip()
+            if _RE_ERROR_CODE.search(val):
+                entry = f'return {val}'[:100]
+                if entry not in error_returns:
+                    error_returns.append(entry)
+        for m in _RE_GOTO.finditer(source):
+            label = f'goto {m.group(1)}'
+            if label not in goto_labels:
+                goto_labels.append(label)
+        for m in _RE_ERRNO.finditer(source):
+            entry = f'errno = {m.group(1)}'
+            if entry not in errno_assignments:
+                errno_assignments.append(entry)
+
+    result: dict = {}
+    if error_returns:
+        result['error_returns'] = list(dict.fromkeys(error_returns))[:8]
+    if goto_labels:
+        result['goto_cleanup'] = list(dict.fromkeys(goto_labels))[:5]
+    if error_checks:
+        result['error_checks'] = error_checks[:6]
+    if unchecked_calls:
+        result['unchecked_calls'] = unchecked_calls[:4]
+    if errno_assignments:
+        result['errno_usage'] = list(dict.fromkeys(errno_assignments))[:4]
+    return result
+
+
+# ==================================================================
+# §5  Python AST SA
+# ==================================================================
+
+def _py_find_target(source: str, func_name: str):
+    """用 ast 找到目标函数节点，失败返回 None。"""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == func_name):
+            return node
+    return None
+
+
+def _sa_python_precondition(source: str, func_name: str) -> dict:
+    fn = _py_find_target(source, func_name)
+    if fn is None:
+        return {}
+
+    guard_conditions: list[str] = []
+    asserts:          list[str] = []
+    scan_n = max(4, int(len(fn.body) * 0.35))
+
+    for stmt in fn.body[:scan_n]:
+        if isinstance(stmt, ast.If):
+            is_early = any(isinstance(s, (ast.Return, ast.Raise))
+                           for s in stmt.body)
+            if is_early:
+                try:
+                    cond = ast.unparse(stmt.test)
+                    guard_conditions.append(f'guard: {cond[:120]}')
+                except Exception:
+                    pass
+        elif isinstance(stmt, ast.Assert):
+            try:
+                cond = ast.unparse(stmt.test)
+                asserts.append(cond[:120])
+            except Exception:
+                pass
+
+    result: dict = {}
+    if guard_conditions:
+        result['guard_conditions'] = guard_conditions
+    if asserts:
+        result['asserts'] = asserts
+    return result
+
+
+def _sa_python_postcondition(source: str, func_name: str) -> dict:
+    fn = _py_find_target(source, func_name)
+    if fn is None:
+        return {}
+
+    return_values: list[str] = []
+    yield_values:  list[str] = []
+
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Return) and node.value is not None:
+            try:
+                val = ast.unparse(node.value)[:100]
+                if val not in return_values:
+                    return_values.append(val)
+            except Exception:
+                pass
+        elif isinstance(node, ast.Yield) and node.value is not None:
+            try:
+                val = ast.unparse(node.value)[:100]
+                if val not in yield_values:
+                    yield_values.append(val)
+            except Exception:
+                pass
+
+    result: dict = {}
+    if return_values:
+        result['return_values'] = list(dict.fromkeys(return_values))[:10]
+    if yield_values:
+        result['yield_values'] = yield_values[:4]
+    return result
+
+
+def _sa_python_exception(source: str, func_name: str) -> dict:
+    fn = _py_find_target(source, func_name)
+    if fn is None:
+        return {}
+
+    raises:    list[str] = []
+    handlers:  list[str] = []
+    err_rets:  list[str] = []
+
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Raise):
+            try:
+                exc = ast.unparse(node.exc) if node.exc else 're-raise'
+                if exc not in raises:
+                    raises.append(exc[:100])
+            except Exception:
+                pass
+        elif isinstance(node, ast.ExceptHandler):
+            try:
+                exc_type = ast.unparse(node.type) if node.type else 'Exception'
+                entry    = f'catches {exc_type}'
+                if entry not in handlers:
+                    handlers.append(entry)
+            except Exception:
+                pass
+        elif isinstance(node, ast.Return) and node.value is not None:
+            try:
+                val = ast.unparse(node.value)
+                if re.search(r'\b(?:None|False|-1|error|err|_error)\b', val, re.I):
+                    short = val[:100]
+                    if short not in err_rets:
+                        err_rets.append(short)
+            except Exception:
+                pass
+
+    result: dict = {}
+    if raises:
+        result['raises'] = raises[:6]
+    if handlers:
+        result['exception_handlers'] = list(dict.fromkeys(handlers))[:6]
+    if err_rets:
+        result['error_returns'] = err_rets[:6]
+    return result
+
+
+# ==================================================================
+# §6  通用正则 SA（兜底，语言无关）
+# ==================================================================
+
+def _sa_regex_precondition(source: str) -> dict:
+    guards: list[str] = []
+    asserts: list[str] = []
+    for m in _RE_C_NULL_GUARD.finditer(source):
+        e = f'null check: {m.group(1).strip()[:120]}'
+        if e not in guards:
+            guards.append(e)
+    for m in _RE_C_RANGE_GUARD.finditer(source):
+        e = f'range check: {m.group(1).strip()[:120]}'
+        if e not in guards:
+            guards.append(e)
+    for m in _RE_ASSERT.finditer(source):
+        e = m.group(1).strip()[:100]
+        if e not in asserts:
+            asserts.append(e)
+    result: dict = {}
+    if guards:
+        result['guard_conditions'] = guards[:8]
+    if asserts:
+        result['asserts'] = asserts[:6]
+    return result
+
+
+def _sa_regex_postcondition(source: str) -> dict:
+    rets: list[str] = []
+    outs: list[str] = []
+    allocs: list[str] = []
+    for m in _RE_RETURN.finditer(source):
+        v = m.group(1).strip()[:100]
+        if v and v not in rets:
+            rets.append(v)
+    for m in _RE_DEREF_ASSIGN.finditer(source):
+        e = f'*{m.group(1)} = {m.group(2).strip()}'[:100]
+        if e not in outs:
+            outs.append(e)
+    for m in _RE_ALLOC_CALL.finditer(source):
+        n = m.group(1).strip()
+        if n not in allocs:
+            allocs.append(n)
+    result: dict = {}
+    if rets:
+        result['return_values'] = list(dict.fromkeys(rets))[:10]
+    if outs:
+        result['output_writes'] = outs[:6]
+    if allocs:
+        result['allocation_calls'] = allocs[:4]
+    return result
+
+
+def _sa_regex_exception(source: str) -> dict:
+    err_rets: list[str] = []
+    gotos: list[str] = []
+    errnos: list[str] = []
+    for m in _RE_RETURN.finditer(source):
+        val = m.group(1).strip()
+        if _RE_ERROR_CODE.search(val):
+            e = f'return {val}'[:100]
+            if e not in err_rets:
+                err_rets.append(e)
+    for m in _RE_GOTO.finditer(source):
+        e = f'goto {m.group(1)}'
+        if e not in gotos:
+            gotos.append(e)
+    for m in _RE_ERRNO.finditer(source):
+        e = f'errno = {m.group(1)}'
+        if e not in errnos:
+            errnos.append(e)
+    result: dict = {}
+    if err_rets:
+        result['error_returns'] = list(dict.fromkeys(err_rets))[:8]
+    if gotos:
+        result['goto_cleanup'] = gotos[:5]
+    if errnos:
+        result['errno_usage'] = errnos[:4]
+    return result
+
+
+# ==================================================================
+# §7  SA 分发器
+# ==================================================================
+
+def _run_sa(
+    kind: str,       # 'precondition' | 'postcondition' | 'exception'
+    source: str,
+    func_name: str,
+    language: str,
+) -> dict:
+    """
+    根据语言选择最优 SA 策略，返回结构化特征字典。
+    C/C++ 优先 tree-sitter，Python 优先 ast，其他语言用正则。
+    """
+    is_c_like = language in ('C', 'C++', 'Objective-C')
+    is_python  = language == 'Python'
+
+    if kind == 'precondition':
+        if is_c_like and _TREE_SITTER_OK:
+            ts  = _sa_c_precondition(source, func_name, language)
+            rg  = _sa_regex_precondition(source)
+            return {**rg, **ts}           # ts 优先覆盖
+        if is_python:
+            py = _sa_python_precondition(source, func_name)
+            rg = _sa_regex_precondition(source)
+            return {**rg, **py}
+        return _sa_regex_precondition(source)
+
+    if kind == 'postcondition':
+        if is_c_like and _TREE_SITTER_OK:
+            ts  = _sa_c_postcondition(source, func_name, language)
+            rg  = _sa_regex_postcondition(source)
+            return {**rg, **ts}
+        if is_python:
+            py = _sa_python_postcondition(source, func_name)
+            rg = _sa_regex_postcondition(source)
+            return {**rg, **py}
+        return _sa_regex_postcondition(source)
+
+    if kind == 'exception':
+        if is_c_like and _TREE_SITTER_OK:
+            ts  = _sa_c_exception(source, func_name, language)
+            rg  = _sa_regex_exception(source)
+            return {**rg, **ts}
+        if is_python:
+            py = _sa_python_exception(source, func_name)
+            rg = _sa_regex_exception(source)
+            return {**rg, **py}
+        return _sa_regex_exception(source)
+
+    return {}
+
+
+# ==================================================================
+# §8  公共主分析骨架（内部复用）
+# ==================================================================
+
+def _analyze_func_field(
+    kind: str,
+    repo_id: int,
+    db_path: Optional[str],
+    func_ids: Optional[list[int]],
+    skip_if_exists: bool,
+    languages: Optional[list[str]],
+) -> dict[int, list[str]]:
+    """
+    通用分析骨架，供三个公开函数复用。
+
+    kind : 'precondition' | 'postcondition' | 'exception'
+    """
+    from llm.client  import chat_completion_json
+    import config as _cfg
+
+    if kind == 'precondition':
+        from llm.prompts import (
+            ANALYZE_FUNC_PRECONDITION_SYSTEM as SYS,
+            ANALYZE_FUNC_PRECONDITION_USER   as USR,
+        )
+    elif kind == 'postcondition':
+        from llm.prompts import (
+            ANALYZE_FUNC_POSTCONDITION_SYSTEM as SYS,
+            ANALYZE_FUNC_POSTCONDITION_USER   as USR,
+        )
+    else:
+        from llm.prompts import (
+            ANALYZE_FUNC_EXCEPTION_SYSTEM as SYS,
+            ANALYZE_FUNC_EXCEPTION_USER   as USR,
+        )
+
+    _db = db_path or DB_PATH
+    label = f'[analyze_func_{kind}]'
+
+    # ── 取仓库信息 ──────────────────────────────────────────────
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f'{label} repo_id={repo_id} 在数据库中不存在。')
+
+    repo_path = repo['path']
+    repo_name = repo['name']
+    print(f'{label} 目标仓库：{repo_name}（{repo_path}）')
+
+    # ── 构建文件语言映射 ─────────────────────────────────────────
+    all_files = FileDB.list_by_repo(repo_id, db_path=_db)
+    file_map  = {f['id']: f for f in all_files}
+
+    # ── 取函数列表并过滤 ─────────────────────────────────────────
+    all_funcs = FuncDB.list_by_repo(repo_id, db_path=_db)
+
+    if func_ids is not None:
+        id_set    = set(func_ids)
+        all_funcs = [f for f in all_funcs if f['id'] in id_set]
+
+    if languages:
+        lang_set  = set(languages)
+        all_funcs = [
+            f for f in all_funcs
+            if (file_map.get(f['file_id']) or {}).get('language', 'Unknown')
+               in lang_set
+        ]
+
+    if skip_if_exists:
+        before = len(all_funcs)
+        all_funcs = [f for f in all_funcs if not f.get(kind)]
+        skipped_existing = before - len(all_funcs)
+        if skipped_existing:
+            print(f'{label} 跳过已有数据的函数：{skipped_existing} 个')
+
+    total   = len(all_funcs)
+    print(
+        f'{label} 待处理函数：{total} 个 '
+        f'（模型：{_cfg.LLM_MODEL}，tree-sitter={'可用' if _TREE_SITTER_OK else '不可用'}）'
+    )
+
+    result:  dict[int, list[str]] = {}
+    success = error = skipped = 0
+
+    for idx, fn_rec in enumerate(all_funcs, start=1):
+        func_id   = fn_rec['id']
+        func_name = fn_rec['name']
+        file_id   = fn_rec.get('file_id')
+
+        # 获取语言信息
+        file_rec  = file_map.get(file_id) if file_id else None
+        language  = (file_rec or {}).get('language', 'Unknown')
+
+        # 解析 place
+        place = fn_rec.get('place') or {}
+        if isinstance(place, str):
+            try:
+                place = _json.loads(place)
+            except Exception:
+                place = {}
+
+        rel_path   = place.get('file_path', '')
+        start_line = int(place.get('start_line', 0))
+        end_line   = int(place.get('end_line', 0))
+
+        if not rel_path or start_line <= 0:
+            skipped += 1
+            result[func_id] = []
+            continue
+
+        # 读取函数源码
+        source = _read_func_source(repo_path, rel_path, start_line, end_line)
+        if source is None:
+            print(f'{label}   ⚠ 无法读取源码：{rel_path}:{start_line}，跳过')
+            skipped += 1
+            result[func_id] = []
+            continue
+
+        # 运行 SA
+        try:
+            sa_results = _run_sa(kind, source, func_name, language)
+        except Exception as exc:
+            print(f'{label}   ⚠ SA 失败（{func_name}）：{exc}，以空 SA 继续')
+            sa_results = {}
+
+        # 准备 prompt 参数
+        io = fn_rec.get('io') or {}
+        if isinstance(io, str):
+            try:
+                io = _json.loads(io)
+            except Exception:
+                io = {}
+
+        params_text  = _format_params(io.get('params', []))
+        return_type  = (io.get('returns') or {}).get('type', '') or ''
+        source_trunc = source[:_MAX_SOURCE_IN_PROMPT]
+        if len(source) > _MAX_SOURCE_IN_PROMPT:
+            source_trunc += f'\n... (源码截断，原长 {len(source)} 字符)'
+
+        user_content = USR.format(
+            func_name   = func_name,
+            language    = language,
+            signature   = str(fn_rec.get('signature', '') or '')[:300],
+            params      = params_text,
+            return_type = return_type,
+            sa_results  = _json.dumps(sa_results, ensure_ascii=False, indent=2),
+            source_code = source_trunc,
+        )
+
+        messages = [
+            {'role': 'system', 'content': SYS},
+            {'role': 'user',   'content': user_content},
+        ]
+
+        # ── LLM 调用（含重试）──────────────────────────────────
+        last_exc  = None
+        call_ok   = False
+
+        for attempt in range(1, _LLM_MAX_RETRIES + 1):
+            try:
+                raw   = chat_completion_json(messages=messages, temperature=0.1)
+                items = _parse_llm_list(raw)
+                FuncDB.update(func_id, db_path=_db, **{kind: items})
+                result[func_id] = items
+                success += 1
+                call_ok = True
+                break                          # 成功，跳出重试循环
+
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _LLM_MAX_RETRIES:
+                    wait = _LLM_RETRY_DELAYS[attempt - 1]
+                    print(
+                        f'{label}   ↻ LLM 调用失败，第 {attempt}/{_LLM_MAX_RETRIES} 次'
+                        f'（func_id={func_id} {func_name}）：{exc}'
+                        f'，{wait}s 后重试…'
+                    )
+                    time.sleep(wait)
+                else:
+                    # 最后一次仍失败
+                    print(
+                        f'{label}   ✗ LLM 调用失败，已重试 {_LLM_MAX_RETRIES} 次放弃'
+                        f'（func_id={func_id} {func_name}）：{last_exc}'
+                    )
+
+        if not call_ok:
+            error += 1
+            result[func_id] = []
+            try:
+                FuncDB.update(func_id, db_path=_db, **{kind: []})
+            except Exception as write_exc:
+                print(f'{label}   ⚠ 写库空列表失败（func_id={func_id}）：{write_exc}')
+        # ── 重试块结束 ─────────────────────────────────────────
+
+        # 进度日志
+        if idx % 10 == 0 or idx == total:
+            print(
+                f'{label}   进度 {idx}/{total}  '
+                f'✓={success}  ✗={error}  skip={skipped}'
+            )
+
+    print(
+        f'{label} ✓ 完成：\n'
+        f'  总处理  : {total}\n'
+        f'  写库成功 : {success}\n'
+        f'  LLM失败  : {error}\n'
+        f'  跳过     : {skipped}'
+    )
+    return result
+
+
+# ==================================================================
+# §9  公开 API
+# ==================================================================
+
+def analyze_func_precondition(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    func_ids: Optional[list[int]] = None,
+    skip_if_exists: bool = True,
+    languages: Optional[list[str]] = None,
+) -> dict[int, list[str]]:
+    """
+    SA + LLM 分析仓库内函数的前置条件，写入 func.precondition。
+
+    前置条件描述调用方在调用该函数前必须保证满足的条件：
+    参数非空约束、值范围、对象状态、资源有效性、调用顺序等。
+
+    Parameters
+    ----------
+    repo_id         : 目标仓库 id
+    db_path         : SQLite 路径；不传则用 config.DB_PATH
+    func_ids        : 指定函数 id 列表；None 则处理全部函数
+    skip_if_exists  : True = 跳过已有 precondition 数据的函数（增量处理）
+    languages       : 语言白名单；None 则不过滤（如 ['C', 'C++']）
+
+    Returns
+    -------
+    dict[int, list[str]]   {func_id → ["前置条件1", "前置条件2", ...]}
+
+    Raises
+    ------
+    ValueError  repo_id 不存在
+    """
+    return _analyze_func_field(
+        kind='precondition',
+        repo_id=repo_id,
+        db_path=db_path,
+        func_ids=func_ids,
+        skip_if_exists=skip_if_exists,
+        languages=languages,
+    )
+
+
+def analyze_func_postcondition(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    func_ids: Optional[list[int]] = None,
+    skip_if_exists: bool = True,
+    languages: Optional[list[str]] = None,
+) -> dict[int, list[str]]:
+    """
+    SA + LLM 分析仓库内函数的后置条件，写入 func.postcondition。
+
+    后置条件描述函数执行完毕后调用方可以依赖的保证：
+    返回值语义、输出参数写回、内存分配责任、状态变更、副作用等。
+
+    Parameters / Returns / Raises 参见 analyze_func_precondition。
+    """
+    return _analyze_func_field(
+        kind='postcondition',
+        repo_id=repo_id,
+        db_path=db_path,
+        func_ids=func_ids,
+        skip_if_exists=skip_if_exists,
+        languages=languages,
+    )
+
+
+def analyze_func_exception(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    func_ids: Optional[list[int]] = None,
+    skip_if_exists: bool = True,
+    languages: Optional[list[str]] = None,
+) -> dict[int, list[str]]:
+    """
+    SA + LLM 分析仓库内函数的异常与错误处理，写入 func.exception。
+
+    分析维度包括：已处理错误路径、错误传播方式、资源清理行为、
+    潜在未检查调用风险、errno 使用等。
+
+    Parameters / Returns / Raises 参见 analyze_func_precondition。
+    """
+    return _analyze_func_field(
+        kind='exception',
+        repo_id=repo_id,
+        db_path=db_path,
+        func_ids=func_ids,
+        skip_if_exists=skip_if_exists,
+        languages=languages,
+    )
+```
+
+`test/mainbuild_step0-7`
+
+```
+"""
+test/mainbuild_step0-7.py
+
+对 minizip-ng 完整执行 Step 0-7 构建流程，不限制处理函数数量。
+
+──────────────────────────────────────────────────────────────────────
+执行顺序
+──────────────────────────────────────────────────────────────────────
+  Step 0 : init_repo
+  Step 1 : analyze_repo_language
+  Step 2 : analyze_repo_area                        （LLM）
+  Step 3 : analyze_area_file
+  Step 4 : analyze_file_language + analyze_file_func
+  Step 5 : build_callgraph
+  Step 6 : analyze_func_callgraph
+  Step 7 : analyze_func_precondition  ─┐
+           analyze_func_postcondition  ├─ ThreadPoolExecutor 三路并行
+           analyze_func_exception     ─┘
+
+──────────────────────────────────────────────────────────────────────
+并行策略（Step 7）
+──────────────────────────────────────────────────────────────────────
+  · 三种分析写入 DB 的列不同（precondition / postcondition / exception），
+    无行级写-写冲突，可安全并发。
+  · LLM 调用为网络 I/O，Python GIL 在 socket.recv 阻塞时主动释放，
+    线程真正并发，无需 multiprocessing。
+  · DB 启用 WAL 模式：读不阻塞写，写操作由 SQLite 内部串行化，
+    不会出现 SQLITE_BUSY 或数据损坏。
+  · 理论加速比 ≈ ×3（取决于 LLM 端的并发上限）。
+  · 若遇 API 限速错误，将 MAX_STEP7_WORKERS 调低为 2 或 1。
+
+──────────────────────────────────────────────────────────────────────
+断点续建
+──────────────────────────────────────────────────────────────────────
+  默认使用 skip_if_exists=True：DB 中已有数据的函数自动跳过，
+  中断后重新执行脚本不会重复调用 LLM。
+  使用 --force 可清空 DB 重新全量构建。
+
+──────────────────────────────────────────────────────────────────────
+输出
+──────────────────────────────────────────────────────────────────────
+  数据库 : data/test_db/db_minizip-ng_main.db
+  日志   : test/log/mainbuild_<YYYYMMDD_HHMMSS>.log
+
+──────────────────────────────────────────────────────────────────────
+运行
+──────────────────────────────────────────────────────────────────────
+  python test/mainbuild_step0-7.py
+  python test/mainbuild_step0-7.py --force   # 清空旧 DB 后重建
+"""
+
+import argparse
+import logging
+import os
+import sqlite3
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+
+# ── 路径 ─────────────────────────────────────────────────────────────────────
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, '..'))
+
+from db.dao import init_db, FuncDB, FileDB
+from analyzer.repo_analyzer     import init_repo, analyze_repo_language, analyze_repo_area
+from analyzer.area_analyzer     import analyze_area_file
+from analyzer.file_analyzer     import analyze_file_language, analyze_file_func
+from analyzer.callgraph_builder import build_callgraph, analyze_func_callgraph
+from analyzer.func_analyzer     import (
+    analyze_func_precondition,
+    analyze_func_postcondition,
+    analyze_func_exception,
+)
+from config import DATA_DIR
+
+# ── 配置 ─────────────────────────────────────────────────────────────────────
+
+_REPO_PATH = os.path.abspath(
+    os.path.join(_HERE, '../../../repo_4_codemap/minizip-ng')
+)
+_DB_DIR  = os.path.join(DATA_DIR, 'test_db')
+_DB_PATH = os.path.join(_DB_DIR, 'db_minizip-ng_main.db')
+
+# Step 7 并行工作线程数
+#   3 → 三路同时调用 LLM，约 ×3 加速（推荐）
+#   2 → 遇 API 限速时降级
+#   1 → 完全串行，用于排查问题
+MAX_STEP7_WORKERS = 3
+
+
+# ── 日志 ─────────────────────────────────────────────────────────────────────
+
+def _setup_logger() -> logging.Logger:
+    log_dir = os.path.join(_HERE, 'log')
+    os.makedirs(log_dir, exist_ok=True)
+    ts       = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = os.path.join(log_dir, f'mainbuild_{ts}.log')
+
+    logger = logging.getLogger('mainbuild')
+    logger.setLevel(logging.DEBUG)
+
+    if not logger.handlers:
+        fh = logging.FileHandler(log_file, encoding='utf-8')
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            '%(asctime)s  %(levelname)-7s  %(message)s', datefmt='%H:%M:%S'
+        ))
+
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(logging.Formatter(
+            '%(asctime)s  %(message)s', datefmt='%H:%M:%S'
+        ))
+
+        logger.addHandler(fh)
+        logger.addHandler(ch)
+
+    logger.info('=' * 70)
+    logger.info('minizip-ng  全量构建  Step 0-7')
+    logger.info(f'仓库  : {_REPO_PATH}')
+    logger.info(f'DB    : {_DB_PATH}')
+    logger.info(f'日志  : {log_file}')
+    logger.info(f'Step7 并行度 : MAX_STEP7_WORKERS = {MAX_STEP7_WORKERS}')
+    logger.info('=' * 70)
+    return logger
+
+
+_log = _setup_logger()
+
+
+# ── SQLite WAL 模式 ───────────────────────────────────────────────────────────
+
+def _enable_wal(db_path: str) -> None:
+    """
+    开启 WAL（Write-Ahead Logging）日志模式。
+
+    Step 7 三路线程并发写入同一 DB 时，默认 DELETE 模式会频繁触发
+    SQLITE_BUSY。WAL 模式下写操作在 SQLite 内部串行化，各线程无需
+    额外加锁即可安全并发。synchronous=NORMAL 在安全性与性能间取平衡。
+    """
+    with sqlite3.connect(db_path) as conn:
+        mode = conn.execute('PRAGMA journal_mode=WAL').fetchone()[0]
+        conn.execute('PRAGMA synchronous=NORMAL')
+    _log.debug(f'[WAL] journal_mode = {mode}')
+
+
+# ── 计时上下文管理器 ─────────────────────────────────────────────────────────
+
+class _Timer:
+    """with _Timer('Step N  xxx'): ..."""
+
+    def __init__(self, label: str):
+        self._label = label
+        self._t0    = 0.0
+
+    def __enter__(self):
+        self._t0 = time.time()
+        _log.info(f'▶ {self._label}')
+        return self
+
+    def __exit__(self, *_):
+        elapsed     = time.time() - self._t0
+        mins, secs  = divmod(int(elapsed), 60)
+        duration    = f'{mins}m {secs}s' if mins else f'{secs}s'
+        _log.info(f'◀ {self._label}  耗时 {duration}')
+
+
+# ── 获取全量 C 函数 ID ────────────────────────────────────────────────────────
+
+def _get_all_c_func_ids(repo_id: int) -> list[int]:
+    """
+    返回仓库内所有 C 语言函数的 func_id 列表，不设数量上限。
+    排列顺序：有 callee（有实际调用）的函数优先，其余追加其后。
+    """
+    all_files  = FileDB.list_by_repo(repo_id, db_path=_DB_PATH)
+    c_file_ids = {f['id'] for f in all_files if f.get('language') == 'C'}
+
+    all_funcs  = FuncDB.list_by_repo(repo_id, db_path=_DB_PATH)
+
+    with_callee = [
+        f for f in all_funcs
+        if f.get('file_id') in c_file_ids
+        and isinstance(f.get('callgraph'), dict)
+        and f['callgraph'].get('callees')
+    ]
+    wc_ids = {f['id'] for f in with_callee}
+    without_callee = [
+        f for f in all_funcs
+        if f.get('file_id') in c_file_ids and f['id'] not in wc_ids
+    ]
+
+    ids = [f['id'] for f in with_callee + without_callee]
+    _log.info(
+        f'[func_ids]  C 函数共 {len(ids)} 个'
+        f'（有 callee={len(with_callee)}，无 callee={len(without_callee)}）'
+    )
+    return ids
+
+
+# ── Step 7 并行分析 ───────────────────────────────────────────────────────────
+
+def _run_step7_parallel(
+    repo_id: int,
+    func_ids: list[int],
+) -> tuple[dict, dict, dict]:
+    """
+    用 ThreadPoolExecutor 并行执行三路 Step 7 分析。
+
+    skip_if_exists=True：DB 中已有数据的函数自动跳过，
+    支持中断后重新执行脚本续建，不会重复调用 LLM。
+    """
+    task_defs = [
+        ('precondition',  analyze_func_precondition),
+        ('postcondition', analyze_func_postcondition),
+        ('exception',     analyze_func_exception),
+    ]
+    results: dict[str, dict] = {}
+    t0 = time.time()
+
+    _log.info(
+        f'  三路并行启动'
+        f'（workers={MAX_STEP7_WORKERS}，目标函数={len(func_ids)} 个）'
+    )
+
+    with ThreadPoolExecutor(
+        max_workers=MAX_STEP7_WORKERS,
+        thread_name_prefix='step7',
+    ) as pool:
+        future_to_name = {
+            pool.submit(
+                fn,
+                repo_id,
+                db_path=_DB_PATH,
+                func_ids=func_ids,
+                skip_if_exists=True,
+            ): name
+            for name, fn in task_defs
+        }
+
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                r        = future.result()
+                nonempty = sum(1 for v in r.values() if v)
+                results[name] = r
+                _log.info(
+                    f'  ✓ {name:<15s}  写库={len(r)} 个'
+                    f'  有数据={nonempty}/{len(r)}'
+                    f'  已耗时={time.time() - t0:.0f}s'
+                )
+            except Exception as exc:
+                _log.error(f'  ✗ {name} 发生异常：{exc}', exc_info=True)
+                results[name] = {}
+
+    _log.info(f'  三路分析全部完成，总耗时 {time.time() - t0:.1f}s')
+    return (
+        results.get('precondition',  {}),
+        results.get('postcondition', {}),
+        results.get('exception',     {}),
+    )
+
+
+# ── 汇总报告 ─────────────────────────────────────────────────────────────────
+
+def _print_summary(
+    pre: dict, post: dict, exc: dict, total_elapsed: float
+) -> None:
+    def _stats(d: dict) -> tuple[int, int, float]:
+        total    = len(d)
+        nonempty = sum(1 for v in d.values() if v)
+        avg_len  = (
+            sum(len(v) for v in d.values() if v) / nonempty
+            if nonempty else 0.0
+        )
+        return nonempty, total, avg_len
+
+    mins, secs = divmod(int(total_elapsed), 60)
+
+    _log.info('')
+    _log.info('=' * 70)
+    _log.info('构建完成  汇总报告')
+    _log.info(f'  DB       : {_DB_PATH}')
+    _log.info(f'  总耗时   : {mins}m {secs}s  ({total_elapsed:.0f}s)')
+    _log.info('  ─── Step 7 覆盖率 ───────────────────────────────────────')
+    for label, d in [
+        ('precondition',  pre),
+        ('postcondition', post),
+        ('exception',     exc),
+    ]:
+        ne, tot, avg = _stats(d)
+        pct = ne / tot * 100 if tot else 0.0
+        _log.info(
+            f'  {label:<15s}: 有数据={ne}/{tot} ({pct:.0f}%)'
+            f'  平均条数={avg:.1f}'
+        )
+    _log.info('=' * 70)
+
+
+# ── 主流程 ────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description='minizip-ng 全量构建 Step 0-7（无函数数量限制）',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例：
+  python test/mainbuild_step0-7.py           # 增量续建（已有数据跳过）
+  python test/mainbuild_step0-7.py --force   # 删除旧 DB 后重建
+        """.strip(),
+    )
+    parser.add_argument(
+        '--force', action='store_true',
+        help='删除旧 DB 后重建（默认：增量续建，已有数据自动跳过）',
+    )
+    args = parser.parse_args()
+
+    # ── 前置检查 ──────────────────────────────────────────────────────────────
+    if not os.path.isdir(_REPO_PATH):
+        _log.error(f'仓库路径不存在，请确认：{_REPO_PATH}')
+        sys.exit(1)
+
+    # ── 准备 DB ───────────────────────────────────────────────────────────────
+    os.makedirs(_DB_DIR, exist_ok=True)
+    if args.force and os.path.exists(_DB_PATH):
+        os.remove(_DB_PATH)
+        _log.info('[--force] 已删除旧数据库，将全量重建')
+
+    init_db(_DB_PATH)
+    _enable_wal(_DB_PATH)
+
+    total_t0 = time.time()
+
+    # ── Step 0：初始化仓库 ────────────────────────────────────────────────────
+    with _Timer('Step 0  init_repo'):
+        repo_id = init_repo(_REPO_PATH, db_path=_DB_PATH)
+    _log.info(f'  repo_id = {repo_id}')
+
+    # ── Step 1：仓库语言统计 ──────────────────────────────────────────────────
+    with _Timer('Step 1  analyze_repo_language'):
+        lang_r = analyze_repo_language(repo_id, db_path=_DB_PATH)
+    _log.info(f'  主语言 : {lang_r.get("main")}')
+
+    # ── Step 2：模块/区域划分（LLM）──────────────────────────────────────────
+    with _Timer('Step 2  analyze_repo_area  [LLM]'):
+        area_r = analyze_repo_area(repo_id, db_path=_DB_PATH)
+    _log.info(f'  area 数 : {len(area_r)}')
+
+    # ── Step 3：文件归属 ──────────────────────────────────────────────────────
+    with _Timer('Step 3  analyze_area_file'):
+        file_r = analyze_area_file(repo_id, db_path=_DB_PATH)
+    _log.info(f'  file 数 : {sum(len(v) for v in file_r.values())}')
+
+    # ── Step 4：文件语言识别 + 函数提取 ──────────────────────────────────────
+    with _Timer('Step 4  analyze_file_language + analyze_file_func'):
+        analyze_file_language(repo_id, db_path=_DB_PATH)
+        func_r = analyze_file_func(repo_id, db_path=_DB_PATH)
+    _log.info(f'  func 数 : {sum(len(v) for v in func_r.values())}')
+
+    # ── Step 5：构建调用图 ────────────────────────────────────────────────────
+    with _Timer('Step 5  build_callgraph'):
+        cg_path = build_callgraph(repo_id, db_path=_DB_PATH)
+    _log.info(f'  callgraph : {cg_path}')
+
+    # ── Step 6：写入调用关系 ──────────────────────────────────────────────────
+    with _Timer('Step 6  analyze_func_callgraph'):
+        cg_r = analyze_func_callgraph(
+            repo_id, db_path=_DB_PATH, callgraph_path=cg_path
+        )
+    _log.info(f'  callgraph 写库 : {len(cg_r)} 个函数')
+
+    # ── Step 7：前置/后置/异常分析（三路并行）────────────────────────────────
+    func_ids = _get_all_c_func_ids(repo_id)
+    with _Timer('Step 7  precondition / postcondition / exception  [LLM × 3 并行]'):
+        pre, post, exc = _run_step7_parallel(repo_id, func_ids)
+
+    # ── 汇总 ──────────────────────────────────────────────────────────────────
+    _print_summary(pre, post, exc, time.time() - total_t0)
+
+
+if __name__ == '__main__':
+    main()
+```
+
+### Step8：all descrption and brief
+
+`llm/prompt`（增加）
+
+````
+# ==================================================================
+#  Step 12: analyze_func_description —— 函数描述 Agent
+# ==================================================================
+
+ANALYZE_FUNC_DESCRIPTION_SYSTEM = """\
+你是一位资深软件安全研究员与系统架构师，专精 C/C++ 代码深度分析。
+
+## 核心任务
+为给定函数生成完整的多维度自然语言描述，供代码知识库检索和安全审计使用。
+
+## 输出格式（纯文本，各节有加粗标题，使用中文，共约300-600字）
+
+**【功能概述】**
+2-4句话，说明该函数的核心功能、输入输出语义及在系统中的整体定位。
+
+**【实现分析】**
+描述关键实现逻辑：主要控制流、重要的数据变换、状态机转换、关键算法及整体结构特征。
+
+**【调用关系分析】**
+分析函数在调用链中的角色：上层调用者的典型使用场景，以及调用的关键子函数及其作用。
+如需了解某个被调函数的详细信息，可使用 get_func_context 工具查询后再分析。
+
+**【安全与稳健性分析】**
+评估潜在安全风险（缓冲区溢出、空指针解引用、整数溢出、资源泄漏、double-free、
+use-after-free等），分析错误处理机制的完善程度以及边界条件处理情况。
+
+**【开发者意图分析】**
+从代码风格、命名惯例、注释和设计模式推断开发者的设计意图、工程取舍与技术决策背景。
+
+## 工具使用规范
+- 仅当需要了解关键 callee 函数的具体实现才调用 get_func_context
+- 通常只需查询 1-3 个最关键的 user 类型 callee 即可，不必查询全部
+- 调用时提供准确的函数名；若已知 func_id 则一并提供以精确匹配
+"""
+
+ANALYZE_FUNC_DESCRIPTION_USER = """\
+请对以下函数进行深度分析并输出完整描述：
+
+## 基本信息
+- 函数名：{func_name}
+- 签名：`{signature}`
+- 所在文件：{file_path}（第 {start_line}–{end_line} 行）
+- 语言：{language}
+
+## 参数列表
+{params}
+
+## 返回类型
+{return_type}
+
+## 调用关系（callgraph）
+```json
+{callgraph}
+```
+
+## 前置条件（SA + LLM 分析结果）
+```json
+{precondition}
+```
+
+## 后置条件（SA + LLM 分析结果）
+```json
+{postcondition}
+```
+
+## 异常处理（SA + LLM 分析结果）
+```json
+{exception}
+```
+
+## 函数源码
+```c
+{source_code}
+```
+
+请按五节格式给出完整分析。如需了解被调函数细节，请先调用 get_func_context 工具。\
+"""
+
+
+# ==================================================================
+#  Step 13: analyze_file_funclist_brief —— 函数简短摘要（批处理）
+# ==================================================================
+
+ANALYZE_FILE_FUNCLIST_BRIEF_SYSTEM = """\
+你是代码文档精简专家。将每个函数的完整描述浓缩为一两句话的简短摘要（brief）。
+要求：准确传达函数核心功能，语言简洁，建议20字以内，最多不超过50字。
+
+## 严格输出要求
+只输出合法 JSON，结构如下，不得包含任何额外解释文字：
+```json
+{
+  "briefs": [
+    {"func_id": 1, "brief": "函数核心功能的简短描述"},
+    {"func_id": 2, "brief": "..."},
+    ...
+  ]
+}
+```
+"""
+
+ANALYZE_FILE_FUNCLIST_BRIEF_USER = """\
+文件：{file_name}
+请为以下 {func_count} 个函数各生成一条 brief：
+
+{func_list_text}
+
+按要求输出 JSON。\
+"""
+
+
+# ==================================================================
+#  Step 14: analyze_file_description —— 文件描述
+# ==================================================================
+
+ANALYZE_FILE_DESCRIPTION_SYSTEM = """\
+你是一位资深软件架构师，为代码知识库生成文件级自然语言描述。
+
+## 任务
+根据文件所在 area 的结构、文件路径、编程语言、函数列表及其描述，
+生成对该文件的全面自然语言描述（纯文本，中文，各节有加粗标题，约200-350字）。
+
+**【文件功能】**
+该文件实现了哪些核心能力，向外提供了哪些接口或功能集合。
+
+**【文件定位】**
+在所属 area 中的角色定位（核心逻辑/接口层/工具模块/辅助模块），
+与同 area 其他文件的协作关系。
+
+**【开发者意图分析】**
+推断该文件的设计意图、模块化边界划定的理由、技术选型背景。
+"""
+
+ANALYZE_FILE_DESCRIPTION_USER = """\
+## 文件信息
+文件名：{file_name}
+语言：{language}
+所在 Area：{area_name}（路径：{area_path}）
+文件路径：{file_path}
+
+## 所在 Area 文件结构
+{area_file_structure}
+
+## 文件中的函数列表与描述
+{func_descriptions}
+
+请生成该文件的自然语言描述。\
+"""
+
+
+# ==================================================================
+#  Step 15: analyze_area_filelist_brief —— 文件简短摘要（批处理）
+# ==================================================================
+
+ANALYZE_AREA_FILELIST_BRIEF_SYSTEM = """\
+你是代码文档精简专家。将每个文件的完整描述浓缩为一两句话的简短摘要（brief）。
+要求：准确概括文件的核心职责，语言简洁，不超过50字。
+
+## 严格输出要求
+只输出合法 JSON，结构如下：
+```json
+{
+  "briefs": [
+    {"file_id": 1, "brief": "文件核心职责的简短描述"},
+    ...
+  ]
+}
+```
+"""
+
+ANALYZE_AREA_FILELIST_BRIEF_USER = """\
+Area：{area_name}
+请为以下 {file_count} 个文件各生成一条 brief：
+
+{file_list_text}
+
+按要求输出 JSON。\
+"""
+
+
+# ==================================================================
+#  Step 16: analyze_area_description —— Area 描述
+# ==================================================================
+
+ANALYZE_AREA_DESCRIPTION_SYSTEM = """\
+你是一位资深软件架构师，为代码知识库生成模块（area）级自然语言描述。
+
+## 任务
+根据 area 的路径、分层依据、文件组织结构及各文件描述，
+生成对该 area 的全面自然语言描述（纯文本，中文，各节有加粗标题，约200-350字）。
+
+**【Area 功能】**
+该模块提供的核心能力，实现了哪些功能集合，对外暴露了哪些关键接口。
+
+**【Area 定位】**
+在整个仓库中的架构定位（核心业务逻辑/基础设施/工具库/接口层），
+与其他 area 的依赖和协作关系。
+
+**【开发者意图分析】**
+推断该模块的设计意图、模块化边界的划定理由、关键技术架构决策。
+"""
+
+ANALYZE_AREA_DESCRIPTION_USER = """\
+## Area 信息
+Area 名称：{area_name}
+路径：{area_path}
+分层依据：{rationale}
+
+## Area 文件结构
+{file_structure}
+
+## 各文件描述
+{file_descriptions}
+
+请生成该 area 的自然语言描述。\
+"""
+
+
+# ==================================================================
+#  Step 17: analyze_repo_arealist_brief —— Area 简短摘要（批处理）
+# ==================================================================
+
+ANALYZE_REPO_AREALIST_BRIEF_SYSTEM = """\
+你是代码文档精简专家。将每个模块（area）的完整描述浓缩为一两句话的简短摘要（brief）。
+要求：准确概括模块的核心职责，语言简洁，不超过50字。
+
+## 严格输出要求
+只输出合法 JSON，结构如下：
+```json
+{
+  "briefs": [
+    {"area_id": 1, "brief": "模块核心职责的简短描述"},
+    ...
+  ]
+}
+```
+"""
+
+ANALYZE_REPO_AREALIST_BRIEF_USER = """\
+仓库：{repo_name}
+请为以下 {area_count} 个模块各生成一条 brief：
+
+{area_list_text}
+
+按要求输出 JSON。\
+"""
+
+
+# ==================================================================
+#  Step 18: analyze_repo_description —— 仓库描述
+# ==================================================================
+
+ANALYZE_REPO_DESCRIPTION_SYSTEM = """\
+你是一位资深软件架构师，为代码知识库生成仓库级自然语言描述。
+
+## 任务
+根据仓库的目录结构、分层架构、语言组成、README 内容及各 area 描述，
+生成对整个仓库的全面自然语言描述（纯文本，中文，各节有加粗标题，约300-500字）。
+
+**【仓库功能】**
+该仓库实现的核心功能，提供了哪些能力，解决了什么领域的问题。
+
+**【技术架构分析】**
+整体架构设计，各层/模块的分工，关键技术选型，数据流和控制流的整体特征。
+
+**【开发者意图分析】**
+推断仓库的设计目标、工程哲学、面向的使用场景，以及代码库的成熟度与维护状态评估。
+"""
+
+ANALYZE_REPO_DESCRIPTION_USER = """\
+## 仓库基本信息
+仓库名：{repo_name}
+主要语言：{main_language}
+语言分布：{language_stats}
+
+## 目录结构（3层）
+```
+{dir_tree}
+```
+
+## 模块划分（area 列表）
+{area_structure}
+
+## README 内容摘要
+{readme_content}
+
+## 各 Area 完整描述
+{area_descriptions}
+
+请生成该仓库的自然语言描述。\
+"""
+````
+
+`llm/agent`
+
+```
+"""
+llm/agent.py
+CodeMAP Agent 实现 —— 供 analyze_func_description (Step 12) 使用
+
+对外暴露：
+  run_func_description_agent(
+      func_rec, repo_id, db_path, repo_path, source_code, model
+  ) → str
+      运行单函数描述 Agent 循环，返回最终自然语言描述文本。
+
+工具：
+  get_func_context(func_name, func_id?) → dict
+      从 DB 查询指定函数的签名、IO、callgraph、前/后置条件、
+      异常处理、已有描述，并可选附上源码片段。
+"""
+
+import json
+import os
+import sys
+import time
+from typing import Optional
+
+import requests
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+
+# ── 常量 ─────────────────────────────────────────────────────────
+_MAX_AGENT_ITERS      = 8     # 最大 Agent 循环轮次（防无限循环）
+_AGENT_TIMEOUT        = 240   # 单次 HTTP 请求超时（秒）
+_MAX_SRC_IN_TOOL      = 2000  # get_func_context 返回的源码最大字符数
+
+
+# ==================================================================
+# 1. 工具 Schema（OpenAI function-calling 格式）
+# ==================================================================
+
+_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_func_context",
+            "description": (
+                "根据函数名（或函数ID）从代码库数据库中查询该函数的完整上下文信息，"
+                "包括：签名、参数列表、返回类型、调用图（caller/callee 关系）、"
+                "前置条件、后置条件、异常处理，以及该函数的已有描述和源码片段。"
+                "当需要深入了解当前函数所调用的子函数时使用。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "func_name": {
+                        "type": "string",
+                        "description": "要查询的函数名称（精确名或近似名均可）",
+                    },
+                    "func_id": {
+                        "type": "integer",
+                        "description": "函数在数据库中的 ID（可选；提供时优先精确匹配）",
+                    },
+                },
+                "required": ["func_name"],
+            },
+        },
+    }
+]
+
+
+# ==================================================================
+# 2. 工具执行器
+# ==================================================================
+
+def _execute_get_func_context(
+    func_name: str,
+    func_id: Optional[int],
+    repo_id: int,
+    db_path: str,
+    repo_path: str,
+) -> dict:
+    """
+    执行 get_func_context 工具调用。
+
+    查找策略：
+      1. 若提供 func_id → 精确按 ID 查找
+      2. 否则按 func_name 在仓库范围内模糊搜索
+      3. 优先返回精确名称匹配的第一个结果
+
+    Returns
+    -------
+    dict  包含 func 完整信息；未找到时返回 {"error": "..."}
+    """
+    from db.dao import FuncDB
+
+    # ① 查找函数记录
+    candidates: list[dict] = []
+    if func_id is not None:
+        rec = FuncDB.get_by_id(func_id, db_path=db_path)
+        if rec:
+            candidates = [rec]
+
+    if not candidates:
+        # 模糊搜索：search_by_name 使用 LIKE %keyword%
+        candidates = FuncDB.search_by_name(repo_id, func_name, db_path=db_path)
+
+    if not candidates:
+        return {
+            "found": False,
+            "error": f"未在数据库中找到函数 '{func_name}'（func_id={func_id}）",
+        }
+
+    # 优先精确名称匹配
+    exact = [c for c in candidates if c["name"] == func_name]
+    rec   = exact[0] if exact else candidates[0]
+
+    # ② 尝试读取源码片段
+    place = rec.get("place") or {}
+    if isinstance(place, str):
+        try:
+            place = json.loads(place)
+        except Exception:
+            place = {}
+
+    src_snippet = ""
+    rel_path    = place.get("file_path", "")
+    start_line  = int(place.get("start_line", 0))
+    end_line    = int(place.get("end_line", start_line))
+
+    if rel_path and start_line > 0:
+        abs_path = os.path.join(repo_path, rel_path)
+        if os.path.isfile(abs_path):
+            try:
+                with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                s = max(0, start_line - 1)
+                e = min(len(lines), end_line)
+                src_snippet = "".join(lines[s:e])
+                if len(src_snippet) > _MAX_SRC_IN_TOOL:
+                    src_snippet = (
+                        src_snippet[:_MAX_SRC_IN_TOOL]
+                        + f"\n...(源码截断，原长 {len(src_snippet)} 字符)"
+                    )
+            except OSError:
+                pass
+
+    # ③ 整合并返回
+    def _safe_json(val):
+        if isinstance(val, str):
+            try:
+                return json.loads(val)
+            except Exception:
+                return val
+        return val or {}
+
+    return {
+        "found":        True,
+        "func_id":      rec["id"],
+        "name":         rec["name"],
+        "signature":    rec.get("signature", ""),
+        "place":        place,
+        "io":           _safe_json(rec.get("io")),
+        "callgraph":    _safe_json(rec.get("callgraph")) or {"callers": [], "callees": []},
+        "precondition": _safe_json(rec.get("precondition")) or [],
+        "postcondition":_safe_json(rec.get("postcondition")) or [],
+        "exception":    _safe_json(rec.get("exception")) or [],
+        "description":  rec.get("description", "") or "",
+        "source_snippet": src_snippet,
+    }
+
+
+# ==================================================================
+# 3. 带 tools 的 LLM 调用
+# ==================================================================
+
+def _chat_with_tools(
+    messages: list[dict],
+    model: Optional[str] = None,
+    temperature: float = 0.3,
+    max_tokens: int = 8192,
+) -> dict:
+    """
+    调用 LLM chat completion（带 tools 定义）。
+
+    Returns
+    -------
+    dict  choices[0].message 原始字典；包含 content 和/或 tool_calls
+
+    Raises
+    ------
+    RuntimeError  网络/HTTP 错误或响应解析失败
+    """
+    base_url = LLM_BASE_URL.rstrip("/")
+    url      = f"{base_url}/v1/chat/completions"
+    _model   = model or LLM_MODEL
+
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type":  "application/json",
+    }
+    payload: dict = {
+        "model":       _model,
+        "messages":    messages,
+        "temperature": temperature,
+        "max_tokens":  max_tokens,
+        "tools":       _TOOLS,
+        "tool_choice": "auto",
+    }
+
+    try:
+        resp = requests.post(
+            url, headers=headers, json=payload, timeout=_AGENT_TIMEOUT
+        )
+        resp.raise_for_status()
+    except requests.exceptions.Timeout:
+        raise RuntimeError(f"[Agent] 请求超时（>{_AGENT_TIMEOUT}s）")
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(f"[Agent] 网络连接失败：{e}")
+    except requests.exceptions.HTTPError:
+        raise RuntimeError(
+            f"[Agent] HTTP {resp.status_code}：{resp.text[:400]}"
+        )
+
+    try:
+        data = resp.json()
+        return data["choices"][0]["message"]
+    except (KeyError, IndexError, ValueError) as e:
+        raise RuntimeError(
+            f"[Agent] 响应解析失败：{e}\n原始响应（前600字）：{resp.text[:600]}"
+        ) from e
+
+
+# ==================================================================
+# 4. Agent 主循环
+# ==================================================================
+
+def run_func_description_agent(
+    func_rec:    dict,
+    repo_id:     int,
+    db_path:     str,
+    repo_path:   str,
+    source_code: str,
+    model:       Optional[str] = None,
+) -> str:
+    """
+    运行单函数描述 Agent，返回自然语言描述字符串。
+
+    流程
+    ----
+    1. 从 func_rec 中提取完整上下文，填充 user 消息
+    2. 进入 Agent 循环（最多 _MAX_AGENT_ITERS 轮）：
+       a. 调用 LLM（带 tools）
+       b. 若模型发出 tool_calls → 逐一执行、追加结果、继续循环
+       c. 若模型返回纯文本 → 即为函数描述，退出循环
+    3. 返回描述文本
+
+    Parameters
+    ----------
+    func_rec    : FuncDB 返回的函数记录字典
+    repo_id     : 仓库 ID（用于 get_func_context 工具查询）
+    db_path     : SQLite 数据库路径
+    repo_path   : 仓库本地根目录绝对路径
+    source_code : 函数源码文本（调用方已做截断）
+    model       : 可选模型名覆盖
+
+    Returns
+    -------
+    str  LLM 生成的函数描述（多段纯文本）
+
+    Raises
+    ------
+    RuntimeError  LLM 调用失败或超出最大迭代轮次
+    """
+    from llm.prompts import (
+        ANALYZE_FUNC_DESCRIPTION_SYSTEM,
+        ANALYZE_FUNC_DESCRIPTION_USER,
+    )
+
+    func_name = func_rec.get("name", "")
+
+    # ── 整理上下文字段 ────────────────────────────────────────────
+
+    def _safe(val):
+        if isinstance(val, str):
+            try:
+                return json.loads(val)
+            except Exception:
+                return val
+        return val
+
+    io            = _safe(func_rec.get("io")) or {}
+    callgraph     = _safe(func_rec.get("callgraph")) or {}
+    precondition  = _safe(func_rec.get("precondition")) or []
+    postcondition = _safe(func_rec.get("postcondition")) or []
+    exception     = _safe(func_rec.get("exception")) or []
+    place         = _safe(func_rec.get("place")) or {}
+
+    params_list = io.get("params", [])
+    if params_list:
+        params_text = "\n".join(
+            f"  - {p.get('name','')}: {p.get('type','')}  {p.get('desc','')}".strip()
+            for p in params_list
+        )
+    else:
+        params_text = "（无参数）"
+
+    return_type = str((io.get("returns") or {}).get("type", "") or "")
+
+    # ── 构建初始 user 消息 ────────────────────────────────────────
+    user_content = ANALYZE_FUNC_DESCRIPTION_USER.format(
+        func_name     = func_name,
+        signature     = str(func_rec.get("signature", "") or "")[:400],
+        file_path     = str(place.get("file_path", "") or ""),
+        start_line    = place.get("start_line", "?"),
+        end_line      = place.get("end_line", "?"),
+        language      = "C",   # 主要针对 C/C++ 仓库；调用方可通过 func_rec 传入
+        params        = params_text,
+        return_type   = return_type or "（未知）",
+        callgraph     = json.dumps(callgraph, ensure_ascii=False, indent=2),
+        precondition  = json.dumps(precondition, ensure_ascii=False, indent=2),
+        postcondition = json.dumps(postcondition, ensure_ascii=False, indent=2),
+        exception     = json.dumps(exception, ensure_ascii=False, indent=2),
+        source_code   = source_code,
+    )
+
+    messages: list[dict] = [
+        {"role": "system", "content": ANALYZE_FUNC_DESCRIPTION_SYSTEM},
+        {"role": "user",   "content": user_content},
+    ]
+
+    # ── Agent 循环 ────────────────────────────────────────────────
+    for iteration in range(_MAX_AGENT_ITERS):
+        assistant_msg = _chat_with_tools(messages, model=model)
+
+        tool_calls = assistant_msg.get("tool_calls")
+
+        if tool_calls:
+            # 将 assistant 消息（含 tool_calls）加入历史
+            messages.append(assistant_msg)
+
+            for tc in tool_calls:
+                tc_id       = tc.get("id", f"call_{iteration}_{id(tc)}")
+                tc_func     = tc.get("function", {})
+                tc_name     = tc_func.get("name", "")
+                tc_args_raw = tc_func.get("arguments", "{}")
+
+                try:
+                    tc_args = json.loads(tc_args_raw)
+                except json.JSONDecodeError:
+                    tc_args = {}
+
+                if tc_name == "get_func_context":
+                    tool_result = _execute_get_func_context(
+                        func_name = tc_args.get("func_name", ""),
+                        func_id   = tc_args.get("func_id"),
+                        repo_id   = repo_id,
+                        db_path   = db_path,
+                        repo_path = repo_path,
+                    )
+                else:
+                    tool_result = {"error": f"未知工具：{tc_name!r}"}
+
+                messages.append({
+                    "role":         "tool",
+                    "tool_call_id": tc_id,
+                    "content":      json.dumps(
+                        tool_result, ensure_ascii=False, indent=2
+                    ),
+                })
+
+            continue  # 带上工具结果继续循环
+
+        # 无 tool_calls → 取文本作为最终描述
+        content = (assistant_msg.get("content") or "").strip()
+        if content:
+            return content
+
+        # 内容为空的异常保护（正常不应发生）
+        if iteration >= _MAX_AGENT_ITERS - 1:
+            break
+
+    raise RuntimeError(
+        f"[Agent] 函数 '{func_name}' 超出最大迭代轮次（{_MAX_AGENT_ITERS}）"
+        "，仍未获得有效描述。"
+    )
+```
+
+``analyzer/func_analyzer.py` 追加（`analyze_func_description`）
+
+```
+# ─────────────────────────────────────────────
+# 以下为 Step 12 新增，依赖已有的 _read_func_source / _format_params 等工具函数
+
+import time as _time
+from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+# LLM 重试配置（Step 12 统一用 5 次）
+_DESC_MAX_RETRIES  = 5
+_DESC_RETRY_DELAYS = (2, 5, 10, 20, 40)   # 第1-5次失败后等待秒数
+_DESC_MAX_SRC_CHARS = 4000                 # prompt 中源码最大字符数
+
+
+def _retry(fn, label: str = "", max_retries: int = _DESC_MAX_RETRIES):
+    """通用重试包装器，失败后按指数退避等待，最多 max_retries 次。"""
+    last_exc = None
+    for i in range(max_retries):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if i < max_retries - 1:
+                wait = _DESC_RETRY_DELAYS[min(i, len(_DESC_RETRY_DELAYS) - 1)]
+                print(
+                    f"  ↻ 第{i+1}/{max_retries}次失败{' (' + label + ')' if label else ''}："
+                    f"{exc}，{wait}s 后重试…"
+                )
+                _time.sleep(wait)
+    raise RuntimeError(
+        f"已重试 {max_retries} 次仍失败{' (' + label + ')' if label else ''}。"
+        f"最后异常：{last_exc}"
+    )
+
+
+def _describe_one_func(
+    fn_rec:    dict,
+    file_map:  dict,
+    repo_id:   int,
+    db_path:   str,
+    repo_path: str,
+) -> tuple[int, str]:
+    """
+    处理单个函数的描述生成（含源码读取 + Agent 调用）。
+    返回 (func_id, description_text)。
+    供 ThreadPoolExecutor 调用。
+    """
+    from llm.agent import run_func_description_agent
+
+    func_id   = fn_rec["id"]
+    func_name = fn_rec["name"]
+
+    # 取文件语言
+    file_rec  = file_map.get(fn_rec.get("file_id"))
+    language  = (file_rec or {}).get("language", "C")
+
+    # 解析 place
+    place = fn_rec.get("place") or {}
+    if isinstance(place, str):
+        try:
+            import json as _j; place = _j.loads(place)
+        except Exception:
+            place = {}
+
+    rel_path   = place.get("file_path", "")
+    start_line = int(place.get("start_line", 0))
+    end_line   = int(place.get("end_line", 0))
+
+    if not rel_path or start_line <= 0:
+        return func_id, ""
+
+    # 读取源码
+    source = _read_func_source(repo_path, rel_path, start_line, end_line)
+    if source is None:
+        return func_id, ""
+
+    if len(source) > _DESC_MAX_SRC_CHARS:
+        source = source[:_DESC_MAX_SRC_CHARS] + f"\n...(源码截断，原长 {len(source)} 字符)"
+
+    # 将语言信息注入 func_rec（agent.py 需要）
+    fn_rec_copy = dict(fn_rec)
+    fn_rec_copy["_language"] = language
+
+    label = f"func_id={func_id} {func_name}"
+
+    def _run():
+        return run_func_description_agent(
+            func_rec   = fn_rec_copy,
+            repo_id    = repo_id,
+            db_path    = db_path,
+            repo_path  = repo_path,
+            source_code= source,
+        )
+
+    desc = _retry(_run, label=label, max_retries=_DESC_MAX_RETRIES)
+    return func_id, desc
+
+
+def analyze_func_description(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    func_ids: Optional[list[int]] = None,
+    skip_if_exists: bool = True,
+    languages: Optional[list[str]] = None,
+    max_workers: int = 10,
+) -> dict[int, str]:
+    """
+    Agent 分析仓库内函数，生成自然语言描述，写入 func.description。
+
+    并行策略
+    --------
+    每个函数独立运行 Agent（LLM 网络 I/O 为主，GIL 在阻塞时释放），
+    ThreadPoolExecutor(max_workers) 实现真并发，默认 10 路。
+
+    重试策略
+    --------
+    每个函数最多重试 5 次（含首次），失败后写入空字符串并记录错误。
+
+    Parameters
+    ----------
+    repo_id         : 目标仓库 id
+    db_path         : SQLite 路径；None 使用 config.DB_PATH
+    func_ids        : 指定函数 id 列表；None 处理全部
+    skip_if_exists  : True = 跳过已有 description 的函数（增量处理）
+    languages       : 语言白名单；None 不过滤（如 ['C', 'C++']）
+    max_workers     : 并发线程数，默认 10
+
+    Returns
+    -------
+    dict[int, str]  {func_id → description_text}
+    """
+    import config as _cfg
+
+    _db = db_path or DB_PATH
+
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_func_description] repo_id={repo_id} 不存在。")
+
+    repo_path = repo["path"]
+    repo_name = repo["name"]
+    print(f"[analyze_func_description] 目标仓库：{repo_name}（{repo_path}）")
+
+    # ── 构建文件语言映射 ──────────────────────────────────────────
+    all_files = FileDB.list_by_repo(repo_id, db_path=_db)
+    file_map  = {f["id"]: f for f in all_files}
+
+    # ── 过滤待处理函数 ────────────────────────────────────────────
+    all_funcs = FuncDB.list_by_repo(repo_id, db_path=_db)
+
+    if func_ids is not None:
+        id_set    = set(func_ids)
+        all_funcs = [f for f in all_funcs if f["id"] in id_set]
+
+    if languages:
+        lang_set  = set(languages)
+        all_funcs = [
+            f for f in all_funcs
+            if (file_map.get(f.get("file_id")) or {}).get("language", "Unknown")
+               in lang_set
+        ]
+
+    if skip_if_exists:
+        before    = len(all_funcs)
+        all_funcs = [f for f in all_funcs if not f.get("description")]
+        print(
+            f"[analyze_func_description] 跳过已有描述：{before - len(all_funcs)} 个"
+        )
+
+    total = len(all_funcs)
+    print(
+        f"[analyze_func_description] 待处理函数：{total} 个"
+        f"（并发度 {max_workers}，模型 {_cfg.LLM_MODEL}）"
+    )
+
+    if total == 0:
+        print("[analyze_func_description] 无需处理，退出。")
+        return {}
+
+    result:   dict[int, str] = {}
+    success   = error = 0
+    t0 = _time.time()
+
+    # ── 并行处理 ─────────────────────────────────────────────────
+    with ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="func_desc"
+    ) as pool:
+        future_to_fid = {
+            pool.submit(
+                _describe_one_func,
+                fn_rec, file_map, repo_id, _db, repo_path,
+            ): fn_rec["id"]
+            for fn_rec in all_funcs
+        }
+
+        done_count = 0
+        for future in _as_completed(future_to_fid):
+            fid       = future_to_fid[future]
+            done_count += 1
+
+            try:
+                fid_out, desc = future.result()
+                result[fid_out] = desc
+                if desc:
+                    FuncDB.update(fid_out, db_path=_db, description=desc)
+                    success += 1
+                else:
+                    error += 1
+            except Exception as exc:
+                print(
+                    f"[analyze_func_description]   ✗ func_id={fid} 最终失败：{exc}"
+                )
+                result[fid] = ""
+                try:
+                    FuncDB.update(fid, db_path=_db, description="")
+                except Exception:
+                    pass
+                error += 1
+
+            # 进度日志
+            if done_count % 20 == 0 or done_count == total:
+                elapsed = _time.time() - t0
+                print(
+                    f"[analyze_func_description]   进度 {done_count}/{total}"
+                    f"  ✓={success}  ✗={error}"
+                    f"  耗时={elapsed:.0f}s"
+                )
+
+    print(
+        f"[analyze_func_description] ✓ 完成：\n"
+        f"  总处理  : {total}\n"
+        f"  写库成功 : {success}\n"
+        f"  失败    : {error}\n"
+        f"  总耗时  : {_time.time() - t0:.0f}s"
+    )
+    return result
+```
+
+`analyzer/file_analyzer.py`（追加）
+
+```
+# ─────────────────────────────────────────────
+# Step 13: analyze_file_funclist_brief
+# Step 14: analyze_file_description
+
+import time as _time_f
+
+_FILE_MAX_DESC_CHARS   = 500    # 传给 LLM 的每个函数描述截断长度
+_FILE_MAX_RETRIES      = 5
+_FILE_RETRY_DELAYS     = (2, 5, 10, 20, 40)
+
+
+def _file_retry(fn, label: str = "", max_retries: int = _FILE_MAX_RETRIES):
+    last_exc = None
+    for i in range(max_retries):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if i < max_retries - 1:
+                wait = _FILE_RETRY_DELAYS[min(i, len(_FILE_RETRY_DELAYS)-1)]
+                print(f"  ↻ 重试{i+1}/{max_retries} ({label})：{exc}，{wait}s 后…")
+                _time_f.sleep(wait)
+    raise RuntimeError(f"重试 {max_retries} 次失败 ({label})：{last_exc}")
+
+
+def analyze_file_funclist_brief(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    skip_if_exists: bool = True,
+) -> dict[int, dict]:
+    """
+    为仓库内每个文件的 funclist 生成 brief（简短摘要），
+    批量写入 file.funclist 的 brief 字段。
+
+    策略：每个文件一次 LLM 批量调用，返回 JSON，
+    从 func.description 生成 brief；若 description 为空则以签名兜底。
+
+    Parameters
+    ----------
+    repo_id        : 目标仓库 id
+    db_path        : SQLite 路径
+    skip_if_exists : True = 跳过 funclist 中已全部有 brief 的文件
+
+    Returns
+    -------
+    dict[int, dict]  {file_id → 更新后的 funclist}
+    """
+    from llm.client  import chat_completion_json
+    from llm.prompts import (
+        ANALYZE_FILE_FUNCLIST_BRIEF_SYSTEM,
+        ANALYZE_FILE_FUNCLIST_BRIEF_USER,
+    )
+
+    _db      = db_path or DB_PATH
+    repo     = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_file_funclist_brief] repo_id={repo_id} 不存在。")
+
+    all_files = FileDB.list_by_repo(repo_id, db_path=_db)
+    print(
+        f"[analyze_file_funclist_brief] 目标仓库：{repo['name']}，"
+        f"共 {len(all_files)} 个文件"
+    )
+
+    result: dict[int, dict] = {}
+    processed = skipped = error = 0
+
+    for file_rec in all_files:
+        file_id   = file_rec["id"]
+        file_name = file_rec["name"]
+        funclist  = file_rec.get("funclist") or []
+        if isinstance(funclist, str):
+            try:
+                import json as _j; funclist = _j.loads(funclist)
+            except Exception:
+                funclist = []
+
+        if not funclist:
+            result[file_id] = []
+            skipped += 1
+            continue
+
+        # skip_if_exists：若所有条目都有非空 brief 则跳过
+        if skip_if_exists and all(e.get("brief") for e in funclist):
+            result[file_id] = funclist
+            skipped += 1
+            continue
+
+        # 收集每个函数的描述（description 或 签名兜底）
+        func_lines: list[str] = []
+        for entry in funclist:
+            fid   = entry.get("func_id")
+            fname = entry.get("name", "")
+            if fid:
+                fn_rec  = FuncDB.get_by_id(fid, db_path=_db)
+                raw_desc = (fn_rec or {}).get("description", "") or ""
+                desc     = raw_desc[:_FILE_MAX_DESC_CHARS]
+                sig      = (fn_rec or {}).get("signature", "")
+            else:
+                desc = ""
+                sig  = fname
+
+            if not desc:
+                desc = f"[签名] {sig}"[:_FILE_MAX_DESC_CHARS]
+
+            func_lines.append(f"func_id={fid}  name={fname}\n描述：{desc}\n")
+
+        func_list_text = "\n---\n".join(func_lines)
+        user_content   = ANALYZE_FILE_FUNCLIST_BRIEF_USER.format(
+            file_name      = file_name,
+            func_count     = len(funclist),
+            func_list_text = func_list_text,
+        )
+        messages = [
+            {"role": "system", "content": ANALYZE_FILE_FUNCLIST_BRIEF_SYSTEM},
+            {"role": "user",   "content": user_content},
+        ]
+
+        try:
+            def _call():
+                return chat_completion_json(messages=messages, temperature=0.1)
+
+            raw = _file_retry(_call, label=f"file_id={file_id} {file_name}")
+        except Exception as exc:
+            print(f"[analyze_file_funclist_brief]   ✗ {file_name}：{exc}")
+            result[file_id] = funclist
+            error += 1
+            continue
+
+        # 解析 briefs
+        briefs_list = raw.get("briefs", []) if isinstance(raw, dict) else []
+        brief_map   = {int(b["func_id"]): b["brief"]
+                       for b in briefs_list
+                       if isinstance(b, dict) and b.get("func_id") is not None}
+
+        # 写回 funclist
+        new_funclist = []
+        for entry in funclist:
+            new_entry = dict(entry)
+            fid = entry.get("func_id")
+            if fid and fid in brief_map:
+                new_entry["brief"] = brief_map[fid]
+            new_funclist.append(new_entry)
+
+        FileDB.update(file_id, db_path=_db, funclist=new_funclist)
+        result[file_id] = new_funclist
+        processed += 1
+        print(
+            f"[analyze_file_funclist_brief]   ✓ {file_name}"
+            f"  funcs={len(new_funclist)}  briefs_updated={len(brief_map)}"
+        )
+
+    print(
+        f"[analyze_file_funclist_brief] ✓ 完成："
+        f"处理={processed}  跳过={skipped}  失败={error}"
+    )
+    return result
+
+
+def analyze_file_description(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    skip_if_exists: bool = True,
+) -> dict[int, str]:
+    """
+    为仓库内每个文件生成自然语言描述，写入 file.description。
+
+    信息来源：文件在 area 中的位置结构 + 函数列表及其 description。
+    依赖：func.description 已完成（Step 12）。
+
+    Parameters
+    ----------
+    repo_id        : 目标仓库 id
+    db_path        : SQLite 路径
+    skip_if_exists : True = 跳过已有 description 的文件
+
+    Returns
+    -------
+    dict[int, str]  {file_id → description_text}
+    """
+    from llm.client  import chat_completion
+    from llm.prompts import (
+        ANALYZE_FILE_DESCRIPTION_SYSTEM,
+        ANALYZE_FILE_DESCRIPTION_USER,
+    )
+    import json as _j
+
+    _db  = db_path or DB_PATH
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_file_description] repo_id={repo_id} 不存在。")
+
+    from db.dao import AreaDB
+    areas     = AreaDB.list_by_repo(repo_id, db_path=_db)
+    area_map  = {a["id"]: a for a in areas}
+
+    all_files = FileDB.list_by_repo(repo_id, db_path=_db)
+    # 按 area 分组，用于构造文件结构上下文
+    files_by_area: dict[int, list[dict]] = {}
+    for f in all_files:
+        files_by_area.setdefault(f["area_id"], []).append(f)
+
+    print(
+        f"[analyze_file_description] 目标仓库：{repo['name']}，"
+        f"共 {len(all_files)} 个文件"
+    )
+
+    result:   dict[int, str] = {}
+    processed = skipped = error = 0
+
+    for file_rec in all_files:
+        file_id   = file_rec["id"]
+        file_name = file_rec["name"]
+        area_id   = file_rec.get("area_id")
+
+        if skip_if_exists and file_rec.get("description"):
+            result[file_id] = file_rec["description"]
+            skipped += 1
+            continue
+
+        area_rec  = area_map.get(area_id, {})
+        area_name = area_rec.get("name", "")
+        area_path = area_rec.get("path", "")
+
+        # 同 area 文件结构
+        sibling_files = files_by_area.get(area_id, [])
+        area_file_structure = "\n".join(
+            f"  {'→ ' if f['id'] == file_id else '  '}{f['name']}  ({f.get('language','')})"
+            for f in sibling_files
+        )
+
+        # 收集函数描述
+        funclist = file_rec.get("funclist") or []
+        if isinstance(funclist, str):
+            try:
+                funclist = _j.loads(funclist)
+            except Exception:
+                funclist = []
+
+        func_desc_parts: list[str] = []
+        for entry in funclist[:40]:   # 最多 40 个函数
+            fid   = entry.get("func_id")
+            fname = entry.get("name", "")
+            brief = entry.get("brief", "")
+            if fid:
+                fn_rec = FuncDB.get_by_id(fid, db_path=_db)
+                desc   = (fn_rec or {}).get("description", "") or ""
+                desc   = desc[:400]
+            else:
+                desc = ""
+            func_desc_parts.append(
+                f"### {fname}\n{brief or desc or '（暂无描述）'}"
+            )
+        func_descriptions = "\n\n".join(func_desc_parts) or "（无函数记录）"
+
+        user_content = ANALYZE_FILE_DESCRIPTION_USER.format(
+            file_name          = file_name,
+            language           = file_rec.get("language", "Unknown"),
+            area_name          = area_name,
+            area_path          = area_path,
+            file_path          = file_rec.get("path", ""),
+            area_file_structure= area_file_structure,
+            func_descriptions  = func_descriptions,
+        )
+        messages = [
+            {"role": "system", "content": ANALYZE_FILE_DESCRIPTION_SYSTEM},
+            {"role": "user",   "content": user_content},
+        ]
+
+        try:
+            def _call():
+                return chat_completion(messages=messages, temperature=0.2)
+
+            desc = _file_retry(_call, label=f"file_id={file_id} {file_name}")
+            desc = desc.strip()
+        except Exception as exc:
+            print(f"[analyze_file_description]   ✗ {file_name}：{exc}")
+            result[file_id] = ""
+            error += 1
+            continue
+
+        FileDB.update(file_id, db_path=_db, description=desc)
+        result[file_id] = desc
+        processed += 1
+        print(f"[analyze_file_description]   ✓ {file_name}  ({len(desc)} 字符)")
+
+    print(
+        f"[analyze_file_description] ✓ 完成："
+        f"处理={processed}  跳过={skipped}  失败={error}"
+    )
+    return result
+```
+
+`analyzer/area_analyzer.py` — 追加
+
+```
+# ──────────────────────────────────────────────
+# Step 15: analyze_area_filelist_brief
+# Step 16: analyze_area_description
+
+import time as _time_a
+from typing import Optional  
+
+_AREA_MAX_DESC_CHARS = 500
+_AREA_MAX_RETRIES    = 5
+_AREA_RETRY_DELAYS   = (2, 5, 10, 20, 40)
+
+
+def _area_retry(fn, label: str = "", max_retries: int = _AREA_MAX_RETRIES):
+    last_exc = None
+    for i in range(max_retries):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if i < max_retries - 1:
+                wait = _AREA_RETRY_DELAYS[min(i, len(_AREA_RETRY_DELAYS)-1)]
+                print(f"  ↻ 重试{i+1}/{max_retries} ({label})：{exc}，{wait}s 后…")
+                _time_a.sleep(wait)
+    raise RuntimeError(f"重试 {max_retries} 次失败 ({label})：{last_exc}")
+
+
+def analyze_area_filelist_brief(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    skip_if_exists: bool = True,
+) -> dict[int, list]:
+    """
+    为仓库内每个 area 的 filelist 生成 brief，
+    批量写入 area.filelist 的 brief 字段。
+
+    依赖：file.description 已完成（Step 14）。
+
+    Returns
+    -------
+    dict[int, list]  {area_id → 更新后的 filelist}
+    """
+    from llm.client  import chat_completion_json
+    from llm.prompts import (
+        ANALYZE_AREA_FILELIST_BRIEF_SYSTEM,
+        ANALYZE_AREA_FILELIST_BRIEF_USER,
+    )
+    import json as _j
+
+    _db   = db_path or DB_PATH
+    repo  = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_area_filelist_brief] repo_id={repo_id} 不存在。")
+
+    areas = AreaDB.list_by_repo(repo_id, db_path=_db)
+    print(
+        f"[analyze_area_filelist_brief] 目标仓库：{repo['name']}，"
+        f"共 {len(areas)} 个 area"
+    )
+
+    result: dict[int, list] = {}
+    processed = skipped = error = 0
+
+    for area_rec in areas:
+        area_id   = area_rec["id"]
+        area_name = area_rec["name"]
+        filelist  = area_rec.get("filelist") or []
+        if isinstance(filelist, str):
+            try:
+                filelist = _j.loads(filelist)
+            except Exception:
+                filelist = []
+
+        if not filelist:
+            result[area_id] = []
+            skipped += 1
+            continue
+
+        if skip_if_exists and all(e.get("brief") for e in filelist):
+            result[area_id] = filelist
+            skipped += 1
+            continue
+
+        # 收集文件描述
+        file_lines: list[str] = []
+        for entry in filelist:
+            fid   = entry.get("file_id")
+            fname = entry.get("name", "")
+            if fid:
+                file_rec = FileDB.get_by_id(fid, db_path=_db)
+                raw_desc = (file_rec or {}).get("description", "") or ""
+                desc     = raw_desc[:_AREA_MAX_DESC_CHARS]
+            else:
+                desc = ""
+            if not desc:
+                desc = f"[文件名] {fname}"
+            file_lines.append(f"file_id={fid}  name={fname}\n描述：{desc}\n")
+
+        file_list_text = "\n---\n".join(file_lines)
+        user_content   = ANALYZE_AREA_FILELIST_BRIEF_USER.format(
+            area_name      = area_name,
+            file_count     = len(filelist),
+            file_list_text = file_list_text,
+        )
+        messages = [
+            {"role": "system", "content": ANALYZE_AREA_FILELIST_BRIEF_SYSTEM},
+            {"role": "user",   "content": user_content},
+        ]
+
+        try:
+            def _call():
+                return chat_completion_json(messages=messages, temperature=0.1)
+
+            raw = _area_retry(_call, label=f"area_id={area_id} {area_name}")
+        except Exception as exc:
+            print(f"[analyze_area_filelist_brief]   ✗ {area_name}：{exc}")
+            result[area_id] = filelist
+            error += 1
+            continue
+
+        briefs_list = raw.get("briefs", []) if isinstance(raw, dict) else []
+        brief_map   = {int(b["file_id"]): b["brief"]
+                       for b in briefs_list
+                       if isinstance(b, dict) and b.get("file_id") is not None}
+
+        new_filelist = []
+        for entry in filelist:
+            new_entry = dict(entry)
+            fid = entry.get("file_id")
+            if fid and fid in brief_map:
+                new_entry["brief"] = brief_map[fid]
+            new_filelist.append(new_entry)
+
+        AreaDB.update(area_id, db_path=_db, filelist=new_filelist)
+        result[area_id] = new_filelist
+        processed += 1
+        print(
+            f"[analyze_area_filelist_brief]   ✓ {area_name}"
+            f"  files={len(new_filelist)}  briefs_updated={len(brief_map)}"
+        )
+
+    print(
+        f"[analyze_area_filelist_brief] ✓ 完成："
+        f"处理={processed}  跳过={skipped}  失败={error}"
+    )
+    return result
+
+
+def analyze_area_description(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    skip_if_exists: bool = True,
+) -> dict[int, str]:
+    """
+    为仓库内每个 area 生成自然语言描述，写入 area.description。
+
+    依赖：file.description 已完成（Step 14）。
+
+    Returns
+    -------
+    dict[int, str]  {area_id → description_text}
+    """
+    from llm.client  import chat_completion
+    from llm.prompts import (
+        ANALYZE_AREA_DESCRIPTION_SYSTEM,
+        ANALYZE_AREA_DESCRIPTION_USER,
+    )
+    import json as _j
+
+    _db   = db_path or DB_PATH
+    repo  = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_area_description] repo_id={repo_id} 不存在。")
+
+    areas = AreaDB.list_by_repo(repo_id, db_path=_db)
+    print(
+        f"[analyze_area_description] 目标仓库：{repo['name']}，"
+        f"共 {len(areas)} 个 area"
+    )
+
+    result:   dict[int, str] = {}
+    processed = skipped = error = 0
+
+    for area_rec in areas:
+        area_id   = area_rec["id"]
+        area_name = area_rec["name"]
+        area_path = area_rec.get("path", "")
+        rationale = area_rec.get("rationale", "")
+
+        if skip_if_exists and area_rec.get("description"):
+            result[area_id] = area_rec["description"]
+            skipped += 1
+            continue
+
+        # 文件结构列表
+        filelist = area_rec.get("filelist") or []
+        if isinstance(filelist, str):
+            try:
+                filelist = _j.loads(filelist)
+            except Exception:
+                filelist = []
+
+        file_structure = "\n".join(
+            f"  {e.get('name','')}  {e.get('brief','')}"
+            for e in filelist
+        ) or "（无文件记录）"
+
+        # 各文件描述
+        file_desc_parts: list[str] = []
+        for entry in filelist[:30]:
+            fid   = entry.get("file_id")
+            fname = entry.get("name", "")
+            brief = entry.get("brief", "")
+            if fid:
+                file_rec = FileDB.get_by_id(fid, db_path=_db)
+                desc     = (file_rec or {}).get("description", "") or ""
+                desc     = desc[:500]
+            else:
+                desc = brief
+            file_desc_parts.append(f"### {fname}\n{desc or brief or '（暂无描述）'}")
+        file_descriptions = "\n\n".join(file_desc_parts) or "（无文件描述）"
+
+        user_content = ANALYZE_AREA_DESCRIPTION_USER.format(
+            area_name         = area_name,
+            area_path         = area_path,
+            rationale         = rationale or "（未提供）",
+            file_structure    = file_structure,
+            file_descriptions = file_descriptions,
+        )
+        messages = [
+            {"role": "system", "content": ANALYZE_AREA_DESCRIPTION_SYSTEM},
+            {"role": "user",   "content": user_content},
+        ]
+
+        try:
+            def _call():
+                return chat_completion(messages=messages, temperature=0.2)
+
+            desc = _area_retry(_call, label=f"area_id={area_id} {area_name}")
+            desc = desc.strip()
+        except Exception as exc:
+            print(f"[analyze_area_description]   ✗ {area_name}：{exc}")
+            result[area_id] = ""
+            error += 1
+            continue
+
+        AreaDB.update(area_id, db_path=_db, description=desc)
+        result[area_id] = desc
+        processed += 1
+        print(f"[analyze_area_description]   ✓ {area_name}  ({len(desc)} 字符)")
+
+    print(
+        f"[analyze_area_description] ✓ 完成："
+        f"处理={processed}  跳过={skipped}  失败={error}"
+    )
+    return result
+```
+
+`analyzer/repo_analyzer.py`（追加）
+
+```
+# ── 在文件末尾追加 ────────────────────────────────────────────────
+# Step 17: analyze_repo_arealist_brief
+# Step 18: analyze_repo_description
+
+import time as _time_r
+from typing import Optional 
+
+_REPO_MAX_AREA_DESC  = 600
+_REPO_MAX_RETRIES    = 5
+_REPO_RETRY_DELAYS   = (2, 5, 10, 20, 40)
+
+
+def _repo_retry(fn, label: str = "", max_retries: int = _REPO_MAX_RETRIES):
+    last_exc = None
+    for i in range(max_retries):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if i < max_retries - 1:
+                wait = _REPO_RETRY_DELAYS[min(i, len(_REPO_RETRY_DELAYS)-1)]
+                print(f"  ↻ 重试{i+1}/{max_retries} ({label})：{exc}，{wait}s 后…")
+                _time_r.sleep(wait)
+    raise RuntimeError(f"重试 {max_retries} 次失败 ({label})：{last_exc}")
+
+
+def analyze_repo_arealist_brief(
+    repo_id: int,
+    db_path: str | None = None,
+    skip_if_exists: bool = True,
+) -> list[dict]:
+    """
+    为 repo.arealist 中每个 area 生成 brief，写回 repo.arealist。
+
+    依赖：area.description 已完成（Step 16）。
+
+    Returns
+    -------
+    list[dict]  更新后的 arealist
+    """
+    from llm.client  import chat_completion_json
+    from llm.prompts import (
+        ANALYZE_REPO_AREALIST_BRIEF_SYSTEM,
+        ANALYZE_REPO_AREALIST_BRIEF_USER,
+    )
+    import json as _j
+
+    _db  = db_path or DB_PATH
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_repo_arealist_brief] repo_id={repo_id} 不存在。")
+
+    arealist = repo.get("arealist") or []
+    if isinstance(arealist, str):
+        try:
+            arealist = _j.loads(arealist)
+        except Exception:
+            arealist = []
+
+    if not arealist:
+        print("[analyze_repo_arealist_brief] arealist 为空，跳过。")
+        return []
+
+    if skip_if_exists and all(e.get("brief") for e in arealist):
+        print("[analyze_repo_arealist_brief] 所有 area 已有 brief，跳过。")
+        return arealist
+
+    # 收集各 area 描述
+    area_lines: list[str] = []
+    for entry in arealist:
+        aid   = entry.get("area_id")
+        aname = entry.get("name", "")
+        if aid:
+            area_rec = AreaDB.get_by_id(aid, db_path=_db)
+            desc     = (area_rec or {}).get("description", "") or ""
+            desc     = desc[:_REPO_MAX_AREA_DESC]
+        else:
+            desc = ""
+        if not desc:
+            desc = f"[area 名称] {aname}"
+        area_lines.append(f"area_id={aid}  name={aname}\n描述：{desc}\n")
+
+    area_list_text = "\n---\n".join(area_lines)
+    user_content   = ANALYZE_REPO_AREALIST_BRIEF_USER.format(
+        repo_name      = repo["name"],
+        area_count     = len(arealist),
+        area_list_text = area_list_text,
+    )
+    messages = [
+        {"role": "system", "content": ANALYZE_REPO_AREALIST_BRIEF_SYSTEM},
+        {"role": "user",   "content": user_content},
+    ]
+
+    try:
+        def _call():
+            return chat_completion_json(messages=messages, temperature=0.1)
+
+        raw = _repo_retry(_call, label=f"repo={repo['name']} arealist_brief")
+    except Exception as exc:
+        print(f"[analyze_repo_arealist_brief] ✗ LLM 调用失败：{exc}")
+        return arealist
+
+    briefs_list = raw.get("briefs", []) if isinstance(raw, dict) else []
+    brief_map   = {int(b["area_id"]): b["brief"]
+                   for b in briefs_list
+                   if isinstance(b, dict) and b.get("area_id") is not None}
+
+    new_arealist = []
+    for entry in arealist:
+        new_entry = dict(entry)
+        aid = entry.get("area_id")
+        if aid and aid in brief_map:
+            new_entry["brief"] = brief_map[aid]
+        new_arealist.append(new_entry)
+
+    RepoDB.update(repo_id, db_path=_db, arealist=new_arealist)
+    print(
+        f"[analyze_repo_arealist_brief] ✓ 完成："
+        f"areas={len(new_arealist)}  briefs_updated={len(brief_map)}"
+    )
+    return new_arealist
+
+
+def analyze_repo_description(
+    repo_id: int,
+    db_path: str | None = None,
+    skip_if_exists: bool = True,
+) -> str:
+    """
+    为仓库生成自然语言描述，写入 repo.description。
+
+    依赖：area.description 已完成（Step 16）。
+
+    Returns
+    -------
+    str  仓库描述文本
+    """
+    from llm.client  import chat_completion
+    from llm.prompts import (
+        ANALYZE_REPO_DESCRIPTION_SYSTEM,
+        ANALYZE_REPO_DESCRIPTION_USER,
+    )
+    import json as _j
+
+    _db  = db_path or DB_PATH
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_repo_description] repo_id={repo_id} 不存在。")
+
+    if skip_if_exists and repo.get("description"):
+        print(
+            f"[analyze_repo_description] '{repo['name']}' 已有描述，跳过。"
+        )
+        return repo["description"]
+
+    repo_path = repo["path"]
+    repo_name = repo["name"]
+
+    # 语言信息
+    language_info = repo.get("language") or {}
+    if isinstance(language_info, str):
+        try:
+            language_info = _j.loads(language_info)
+        except Exception:
+            language_info = {}
+    main_language  = language_info.get("main", "Unknown")
+    lang_stats_raw = language_info.get("stats", [])
+    language_stats = "，".join(
+        f"{s['lang']} {s['pct']}%" for s in lang_stats_raw[:6]
+    )
+
+    # 目录树
+    dir_tree = _build_dir_tree(repo_path, max_depth=3)
+
+    # README
+    readme_content = _read_readme(repo_path)
+
+    # area 结构 + 描述
+    areas      = AreaDB.list_by_repo(repo_id, db_path=_db)
+    arealist   = repo.get("arealist") or []
+    if isinstance(arealist, str):
+        try:
+            arealist = _j.loads(arealist)
+        except Exception:
+            arealist = []
+
+    brief_map  = {e.get("area_id"): e.get("brief", "") for e in arealist}
+
+    area_structure_lines: list[str] = []
+    area_desc_parts:      list[str] = []
+
+    for area in areas:
+        aid   = area["id"]
+        aname = area["name"]
+        apath = area["path"]
+        brief = brief_map.get(aid, "")
+        area_structure_lines.append(f"  [{aname}]  path={apath}  {brief}")
+
+        desc = area.get("description", "") or ""
+        area_desc_parts.append(
+            f"### {aname}（{apath}）\n{desc[:_REPO_MAX_AREA_DESC] or '（暂无描述）'}"
+        )
+
+    area_structure  = "\n".join(area_structure_lines) or "（无 area 记录）"
+    area_descriptions = "\n\n".join(area_desc_parts) or "（无 area 描述）"
+
+    user_content = ANALYZE_REPO_DESCRIPTION_USER.format(
+        repo_name         = repo_name,
+        main_language     = main_language,
+        language_stats    = language_stats or "（未知）",
+        dir_tree          = dir_tree,
+        area_structure    = area_structure,
+        readme_content    = readme_content,
+        area_descriptions = area_descriptions,
+    )
+    messages = [
+        {"role": "system", "content": ANALYZE_REPO_DESCRIPTION_SYSTEM},
+        {"role": "user",   "content": user_content},
+    ]
+
+    try:
+        def _call():
+            return chat_completion(messages=messages, temperature=0.2)
+
+        desc = _repo_retry(_call, label=f"repo={repo_name} description")
+        desc = desc.strip()
+    except Exception as exc:
+        print(f"[analyze_repo_description] ✗ LLM 调用失败：{exc}")
+        return ""
+
+    RepoDB.update(repo_id, db_path=_db, description=desc)
+    print(f"[analyze_repo_description] ✓ 完成：{len(desc)} 字符")
+    return desc
+```
+
+`test/mainbuild_step12-18.py`
+
+```
+"""
+test/mainbuild_step12-18.py
+
+在已有 Step 0-7 数据库基础上，为 minizip-ng 补充完成 后续 的全量描述生成。
+
+──────────────────────────────────────────────────────────────────────
+执行顺序（均支持断点续建，skip_if_exists=True）
+──────────────────────────────────────────────────────────────────────
+  Step 12 : analyze_func_description        [Agent × parallel 10，重试5次]
+  Step 13 : analyze_file_funclist_brief     [LLM batch per file，重试5次]
+  Step 14 : analyze_file_description        [LLM per file，重试5次]
+  Step 15 : analyze_area_filelist_brief     [LLM batch per area，重试5次]
+  Step 16 : analyze_area_description        [LLM per area，重试5次]
+  Step 17 : analyze_repo_arealist_brief     [LLM batch，重试5次]
+  Step 18 : analyze_repo_description        [LLM，重试5次]
+
+──────────────────────────────────────────────────────────────────────
+前置条件
+──────────────────────────────────────────────────────────────────────
+  已完成 Step 0-7，数据库存在于：
+    data/test_db/db_minizip-ng_main.db
+
+──────────────────────────────────────────────────────────────────────
+断点续建
+──────────────────────────────────────────────────────────────────────
+  默认 skip_if_exists=True：DB 中已有描述的实体自动跳过。
+  --force  重新生成所有描述（不删除 DB，仅覆盖写入）。
+  --step N 只执行从第 N 步开始（如 --step 14 跳过前3步）。
+
+──────────────────────────────────────────────────────────────────────
+输出
+──────────────────────────────────────────────────────────────────────
+  复用数据库 : data/test_db/db_minizip-ng_main.db
+  日志       : test/log/mainbuild_step12-18_<YYYYMMDD_HHMMSS>.log
+
+──────────────────────────────────────────────────────────────────────
+运行
+──────────────────────────────────────────────────────────────────────
+  python test/mainbuild_step12-18.py
+  python test/mainbuild_step12-18.py --force
+  python test/mainbuild_step12-18.py --step 14
+  python test/mainbuild_step12-18.py --force --step 16
+"""
+
+import argparse
+import logging
+import os
+import sys
+import time
+from datetime import datetime
+
+# ── 路径 ─────────────────────────────────────────────────────────────────────
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, '..'))
+
+from db.dao  import RepoDB, FuncDB, FileDB
+from config  import DATA_DIR
+
+from analyzer.func_analyzer  import analyze_func_description
+from analyzer.file_analyzer  import (
+    analyze_file_funclist_brief,
+    analyze_file_description,
+)
+from analyzer.area_analyzer  import (
+    analyze_area_filelist_brief,
+    analyze_area_description,
+)
+from analyzer.repo_analyzer  import (
+    analyze_repo_arealist_brief,
+    analyze_repo_description,
+)
+
+# ── 配置 ─────────────────────────────────────────────────────────────────────
+
+_DB_PATH = os.path.join(DATA_DIR, 'test_db', 'db_minizip-ng_main.db')
+
+# Step 12 并发度（Agent per func）
+FUNC_DESC_WORKERS = 10
+
+
+# ── 日志 ─────────────────────────────────────────────────────────────────────
+
+def _setup_logger() -> logging.Logger:
+    log_dir  = os.path.join(_HERE, 'log')
+    os.makedirs(log_dir, exist_ok=True)
+    ts       = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = os.path.join(log_dir, f'mainbuild_step12-18_{ts}.log')
+
+    logger = logging.getLogger('mainbuild_step12-18')
+    logger.setLevel(logging.DEBUG)
+
+    if not logger.handlers:
+        fh = logging.FileHandler(log_file, encoding='utf-8')
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            '%(asctime)s  %(levelname)-7s  %(message)s', datefmt='%H:%M:%S'
+        ))
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(logging.Formatter(
+            '%(asctime)s  %(message)s', datefmt='%H:%M:%S'
+        ))
+        logger.addHandler(fh)
+        logger.addHandler(ch)
+
+    logger.info('=' * 70)
+    logger.info('minizip-ng  Step 8 描述生成  (基于已有 Step 0-7 数据库)')
+    logger.info(f'DB   : {_DB_PATH}')
+    logger.info(f'日志 : {log_file}')
+    logger.info('=' * 70)
+    return logger
+
+
+_log = _setup_logger()
+
+
+# ── 计时上下文 ────────────────────────────────────────────────────────────────
+
+class _Timer:
+    def __init__(self, label: str):
+        self._label = label
+        self._t0    = 0.0
+
+    def __enter__(self):
+        self._t0 = time.time()
+        _log.info(f'▶ {self._label}')
+        return self
+
+    def __exit__(self, *_):
+        elapsed     = time.time() - self._t0
+        mins, secs  = divmod(int(elapsed), 60)
+        duration    = f'{mins}m {secs}s' if mins else f'{secs}s'
+        _log.info(f'◀ {self._label}  耗时 {duration}')
+
+
+# ── 统计工具 ──────────────────────────────────────────────────────────────────
+
+def _count_nonempty(d: dict) -> tuple[int, int]:
+    """返回 (有数据数量, 总数量)"""
+    total    = len(d)
+    nonempty = sum(1 for v in d.values() if v)
+    return nonempty, total
+
+
+def _print_summary(
+    repo_id: int,
+    step_results: dict[int, dict],
+    total_elapsed: float,
+) -> None:
+    """打印 Step 8 汇总报告。"""
+    mins, secs = divmod(int(total_elapsed), 60)
+    _log.info('')
+    _log.info('=' * 70)
+    _log.info('Step 8 构建完成  汇总报告')
+    _log.info(f'  DB      : {_DB_PATH}')
+    _log.info(f'  总耗时  : {mins}m {secs}s  ({total_elapsed:.0f}s)')
+    _log.info('  ─── 各步骤结果 ───────────────────────────────────────────')
+
+    labels = {
+        12: 'Step 12  func.description',
+        13: 'Step 13  file funclist brief',
+        14: 'Step 14  file.description',
+        15: 'Step 15  area filelist brief',
+        16: 'Step 16  area.description',
+        17: 'Step 17  repo arealist brief',
+        18: 'Step 18  repo.description',
+    }
+    for step, label in labels.items():
+        res = step_results.get(step)
+        if res is None:
+            _log.info(f'  {label:<40s} [跳过]')
+        elif isinstance(res, dict):
+            ne, tot = _count_nonempty(res)
+            pct = ne / tot * 100 if tot else 0
+            _log.info(f'  {label:<40s} {ne}/{tot} ({pct:.0f}%)')
+        elif isinstance(res, (list, str)):
+            n = len(res) if isinstance(res, list) else (1 if res else 0)
+            _log.info(f'  {label:<40s} ok ({n})')
+
+    # 额外：从 DB 直接统计 func.description 覆盖率
+    all_funcs    = FuncDB.list_by_repo(repo_id, db_path=_DB_PATH)
+    with_desc    = sum(1 for f in all_funcs if f.get('description'))
+    _log.info(
+        f'\n  func.description DB 实际覆盖：{with_desc}/{len(all_funcs)}'
+        f'  ({with_desc/len(all_funcs)*100:.1f}%)' if all_funcs else ''
+    )
+    _log.info('=' * 70)
+
+
+# ── 主流程 ────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description='minizip-ng Step 8 全量描述生成',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例：
+  python test/mainbuild_step12-18.py                 # 增量续建
+  python test/mainbuild_step12-18.py --force         # 覆盖重建所有描述
+  python test/mainbuild_step12-18.py --step 14       # 从 Step 14 开始
+  python test/mainbuild_step12-18.py --force --step 16  # 强制重建 Step 16+
+        """.strip(),
+    )
+    parser.add_argument(
+        '--force', action='store_true',
+        help='覆盖已有描述重新生成（默认：增量，已有数据跳过）',
+    )
+    parser.add_argument(
+        '--step', type=int, default=12, choices=range(12, 19),
+        metavar='N',
+        help='从第 N 步开始执行（12-18，默认12）',
+    )
+    args = parser.parse_args()
+
+    skip = not args.force
+    start_step = args.step
+
+    # ── 前置检查 ──────────────────────────────────────────────────────────────
+    if not os.path.isfile(_DB_PATH):
+        _log.error(
+            f'数据库文件不存在：{_DB_PATH}\n'
+            '请先运行 python test/mainbuild_step0-7.py 完成 Step 0-7 构建。'
+        )
+        sys.exit(1)
+
+    # 取 repo_id
+    repo = RepoDB.get_by_name('minizip-ng', db_path=_DB_PATH)
+    if repo is None:
+        _log.error(
+            "数据库中未找到 'minizip-ng' 仓库记录。"
+            "请确认 Step 0-7 已成功完成。"
+        )
+        sys.exit(1)
+
+    repo_id = repo['id']
+    _log.info(f'repo_id = {repo_id}  (minizip-ng)')
+    _log.info(f'skip_if_exists = {skip}  start_step = {start_step}')
+
+    total_t0      = time.time()
+    step_results: dict[int, object] = {}
+
+    # ── Step 12: analyze_func_description ────────────────────────────────────
+    if start_step <= 12:
+        with _Timer(f'Step 12  analyze_func_description  [Agent × {FUNC_DESC_WORKERS} 并行]'):
+            res = analyze_func_description(
+                repo_id        = repo_id,
+                db_path        = _DB_PATH,
+                skip_if_exists = skip,
+                languages      = ['C', 'C++'],
+                max_workers    = FUNC_DESC_WORKERS,
+            )
+        ne, tot = _count_nonempty(res)
+        _log.info(f'  描述生成：{ne}/{tot} 个函数')
+        step_results[12] = res
+    else:
+        _log.info(f'Step 12 跳过（--step={start_step}）')
+        step_results[12] = None
+
+    # ── Step 13: analyze_file_funclist_brief ──────────────────────────────────
+    if start_step <= 13:
+        with _Timer('Step 13  analyze_file_funclist_brief'):
+            res = analyze_file_funclist_brief(
+                repo_id        = repo_id,
+                db_path        = _DB_PATH,
+                skip_if_exists = skip,
+            )
+        _log.info(f'  处理文件：{len(res)} 个')
+        step_results[13] = res
+    else:
+        _log.info(f'Step 13 跳过（--step={start_step}）')
+        step_results[13] = None
+
+    # ── Step 14: analyze_file_description ────────────────────────────────────
+    if start_step <= 14:
+        with _Timer('Step 14  analyze_file_description'):
+            res = analyze_file_description(
+                repo_id        = repo_id,
+                db_path        = _DB_PATH,
+                skip_if_exists = skip,
+            )
+        ne, tot = _count_nonempty(res)
+        _log.info(f'  描述生成：{ne}/{tot} 个文件')
+        step_results[14] = res
+    else:
+        _log.info(f'Step 14 跳过（--step={start_step}）')
+        step_results[14] = None
+
+    # ── Step 15: analyze_area_filelist_brief ──────────────────────────────────
+    if start_step <= 15:
+        with _Timer('Step 15  analyze_area_filelist_brief'):
+            res = analyze_area_filelist_brief(
+                repo_id        = repo_id,
+                db_path        = _DB_PATH,
+                skip_if_exists = skip,
+            )
+        _log.info(f'  处理 area：{len(res)} 个')
+        step_results[15] = res
+    else:
+        _log.info(f'Step 15 跳过（--step={start_step}）')
+        step_results[15] = None
+
+    # ── Step 16: analyze_area_description ────────────────────────────────────
+    if start_step <= 16:
+        with _Timer('Step 16  analyze_area_description'):
+            res = analyze_area_description(
+                repo_id        = repo_id,
+                db_path        = _DB_PATH,
+                skip_if_exists = skip,
+            )
+        ne, tot = _count_nonempty(res)
+        _log.info(f'  描述生成：{ne}/{tot} 个 area')
+        step_results[16] = res
+    else:
+        _log.info(f'Step 16 跳过（--step={start_step}）')
+        step_results[16] = None
+
+    # ── Step 17: analyze_repo_arealist_brief ──────────────────────────────────
+    if start_step <= 17:
+        with _Timer('Step 17  analyze_repo_arealist_brief'):
+            res = analyze_repo_arealist_brief(
+                repo_id        = repo_id,
+                db_path        = _DB_PATH,
+                skip_if_exists = skip,
+            )
+        _log.info(f'  arealist brief 条目：{len(res)} 个')
+        step_results[17] = res
+    else:
+        _log.info(f'Step 17 跳过（--step={start_step}）')
+        step_results[17] = None
+
+    # ── Step 18: analyze_repo_description ────────────────────────────────────
+    if start_step <= 18:
+        with _Timer('Step 18  analyze_repo_description'):
+            desc = analyze_repo_description(
+                repo_id        = repo_id,
+                db_path        = _DB_PATH,
+                skip_if_exists = skip,
+            )
+        _log.info(f'  仓库描述：{len(desc)} 字符')
+        step_results[18] = desc
+    else:
+        _log.info(f'Step 18 跳过（--step={start_step}）')
+        step_results[18] = None
+
+    # ── 汇总 ─────────────────────────────────────────────────────────────────
+    _print_summary(repo_id, step_results, time.time() - total_t0)
+
+
+if __name__ == '__main__':
+    main()
+```
+

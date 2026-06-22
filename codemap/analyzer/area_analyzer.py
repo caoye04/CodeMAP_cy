@@ -410,3 +410,259 @@ def analyze_area_file(
         f"共 {total_files} 个文件已入库。"
     )
     return result
+
+# ─────────────────────────────────────────────────
+# Step 15: analyze_area_filelist_brief
+# Step 16: analyze_area_description
+
+import time as _time_a
+from typing import Optional
+
+_AREA_MAX_DESC_CHARS = 500
+_AREA_MAX_RETRIES    = 5
+_AREA_RETRY_DELAYS   = (2, 5, 10, 20, 40)
+
+
+def _area_retry(fn, label: str = "", max_retries: int = _AREA_MAX_RETRIES):
+    last_exc = None
+    for i in range(max_retries):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if i < max_retries - 1:
+                wait = _AREA_RETRY_DELAYS[min(i, len(_AREA_RETRY_DELAYS)-1)]
+                print(f"  ↻ 重试{i+1}/{max_retries} ({label})：{exc}，{wait}s 后…")
+                _time_a.sleep(wait)
+    raise RuntimeError(f"重试 {max_retries} 次失败 ({label})：{last_exc}")
+
+
+def analyze_area_filelist_brief(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    skip_if_exists: bool = True,
+) -> dict[int, list]:
+    """
+    为仓库内每个 area 的 filelist 生成 brief，
+    批量写入 area.filelist 的 brief 字段。
+
+    依赖：file.description 已完成（Step 14）。
+
+    Returns
+    -------
+    dict[int, list]  {area_id → 更新后的 filelist}
+    """
+    from llm.client  import chat_completion_json
+    from llm.prompts import (
+        ANALYZE_AREA_FILELIST_BRIEF_SYSTEM,
+        ANALYZE_AREA_FILELIST_BRIEF_USER,
+    )
+    import json as _j
+
+    _db   = db_path or DB_PATH
+    repo  = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_area_filelist_brief] repo_id={repo_id} 不存在。")
+
+    areas = AreaDB.list_by_repo(repo_id, db_path=_db)
+    print(
+        f"[analyze_area_filelist_brief] 目标仓库：{repo['name']}，"
+        f"共 {len(areas)} 个 area"
+    )
+
+    result: dict[int, list] = {}
+    processed = skipped = error = 0
+
+    for area_rec in areas:
+        area_id   = area_rec["id"]
+        area_name = area_rec["name"]
+        filelist  = area_rec.get("filelist") or []
+        if isinstance(filelist, str):
+            try:
+                filelist = _j.loads(filelist)
+            except Exception:
+                filelist = []
+
+        if not filelist:
+            result[area_id] = []
+            skipped += 1
+            continue
+
+        if skip_if_exists and all(e.get("brief") for e in filelist):
+            result[area_id] = filelist
+            skipped += 1
+            continue
+
+        # 收集文件描述
+        file_lines: list[str] = []
+        for entry in filelist:
+            fid   = entry.get("file_id")
+            fname = entry.get("name", "")
+            if fid:
+                file_rec = FileDB.get_by_id(fid, db_path=_db)
+                raw_desc = (file_rec or {}).get("description", "") or ""
+                desc     = raw_desc[:_AREA_MAX_DESC_CHARS]
+            else:
+                desc = ""
+            if not desc:
+                desc = f"[文件名] {fname}"
+            file_lines.append(f"file_id={fid}  name={fname}\n描述：{desc}\n")
+
+        file_list_text = "\n---\n".join(file_lines)
+        user_content   = ANALYZE_AREA_FILELIST_BRIEF_USER.format(
+            area_name      = area_name,
+            file_count     = len(filelist),
+            file_list_text = file_list_text,
+        )
+        messages = [
+            {"role": "system", "content": ANALYZE_AREA_FILELIST_BRIEF_SYSTEM},
+            {"role": "user",   "content": user_content},
+        ]
+
+        try:
+            def _call():
+                return chat_completion_json(messages=messages, temperature=0.1)
+
+            raw = _area_retry(_call, label=f"area_id={area_id} {area_name}")
+        except Exception as exc:
+            print(f"[analyze_area_filelist_brief]   ✗ {area_name}：{exc}")
+            result[area_id] = filelist
+            error += 1
+            continue
+
+        briefs_list = raw.get("briefs", []) if isinstance(raw, dict) else []
+        brief_map   = {int(b["file_id"]): b["brief"]
+                       for b in briefs_list
+                       if isinstance(b, dict) and b.get("file_id") is not None}
+
+        new_filelist = []
+        for entry in filelist:
+            new_entry = dict(entry)
+            fid = entry.get("file_id")
+            if fid and fid in brief_map:
+                new_entry["brief"] = brief_map[fid]
+            new_filelist.append(new_entry)
+
+        AreaDB.update(area_id, db_path=_db, filelist=new_filelist)
+        result[area_id] = new_filelist
+        processed += 1
+        print(
+            f"[analyze_area_filelist_brief]   ✓ {area_name}"
+            f"  files={len(new_filelist)}  briefs_updated={len(brief_map)}"
+        )
+
+    print(
+        f"[analyze_area_filelist_brief] ✓ 完成："
+        f"处理={processed}  跳过={skipped}  失败={error}"
+    )
+    return result
+
+
+def analyze_area_description(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    skip_if_exists: bool = True,
+) -> dict[int, str]:
+    """
+    为仓库内每个 area 生成自然语言描述，写入 area.description。
+
+    依赖：file.description 已完成（Step 14）。
+
+    Returns
+    -------
+    dict[int, str]  {area_id → description_text}
+    """
+    from llm.client  import chat_completion
+    from llm.prompts import (
+        ANALYZE_AREA_DESCRIPTION_SYSTEM,
+        ANALYZE_AREA_DESCRIPTION_USER,
+    )
+    import json as _j
+
+    _db   = db_path or DB_PATH
+    repo  = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_area_description] repo_id={repo_id} 不存在。")
+
+    areas = AreaDB.list_by_repo(repo_id, db_path=_db)
+    print(
+        f"[analyze_area_description] 目标仓库：{repo['name']}，"
+        f"共 {len(areas)} 个 area"
+    )
+
+    result:   dict[int, str] = {}
+    processed = skipped = error = 0
+
+    for area_rec in areas:
+        area_id   = area_rec["id"]
+        area_name = area_rec["name"]
+        area_path = area_rec.get("path", "")
+        rationale = area_rec.get("rationale", "")
+
+        if skip_if_exists and area_rec.get("description"):
+            result[area_id] = area_rec["description"]
+            skipped += 1
+            continue
+
+        # 文件结构列表
+        filelist = area_rec.get("filelist") or []
+        if isinstance(filelist, str):
+            try:
+                filelist = _j.loads(filelist)
+            except Exception:
+                filelist = []
+
+        file_structure = "\n".join(
+            f"  {e.get('name','')}  {e.get('brief','')}"
+            for e in filelist
+        ) or "（无文件记录）"
+
+        # 各文件描述
+        file_desc_parts: list[str] = []
+        for entry in filelist[:30]:
+            fid   = entry.get("file_id")
+            fname = entry.get("name", "")
+            brief = entry.get("brief", "")
+            if fid:
+                file_rec = FileDB.get_by_id(fid, db_path=_db)
+                desc     = (file_rec or {}).get("description", "") or ""
+                desc     = desc[:500]
+            else:
+                desc = brief
+            file_desc_parts.append(f"### {fname}\n{desc or brief or '（暂无描述）'}")
+        file_descriptions = "\n\n".join(file_desc_parts) or "（无文件描述）"
+
+        user_content = ANALYZE_AREA_DESCRIPTION_USER.format(
+            area_name         = area_name,
+            area_path         = area_path,
+            rationale         = rationale or "（未提供）",
+            file_structure    = file_structure,
+            file_descriptions = file_descriptions,
+        )
+        messages = [
+            {"role": "system", "content": ANALYZE_AREA_DESCRIPTION_SYSTEM},
+            {"role": "user",   "content": user_content},
+        ]
+
+        try:
+            def _call():
+                return chat_completion(messages=messages, temperature=0.2)
+
+            desc = _area_retry(_call, label=f"area_id={area_id} {area_name}")
+            desc = desc.strip()
+        except Exception as exc:
+            print(f"[analyze_area_description]   ✗ {area_name}：{exc}")
+            result[area_id] = ""
+            error += 1
+            continue
+
+        AreaDB.update(area_id, db_path=_db, description=desc)
+        result[area_id] = desc
+        processed += 1
+        print(f"[analyze_area_description]   ✓ {area_name}  ({len(desc)} 字符)")
+
+    print(
+        f"[analyze_area_description] ✓ 完成："
+        f"处理={processed}  跳过={skipped}  失败={error}"
+    )
+    return result

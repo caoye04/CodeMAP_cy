@@ -1079,3 +1079,295 @@ def analyze_file_func(
         )
 
     return result
+
+# ──────────────────────────────────────────────────
+# Step 13: analyze_file_funclist_brief
+# Step 14: analyze_file_description
+
+import time as _time_f
+
+_FILE_MAX_DESC_CHARS   = 500    # 传给 LLM 的每个函数描述截断长度
+_FILE_MAX_RETRIES      = 5
+_FILE_RETRY_DELAYS     = (2, 5, 10, 20, 40)
+
+
+def _file_retry(fn, label: str = "", max_retries: int = _FILE_MAX_RETRIES):
+    last_exc = None
+    for i in range(max_retries):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if i < max_retries - 1:
+                wait = _FILE_RETRY_DELAYS[min(i, len(_FILE_RETRY_DELAYS)-1)]
+                print(f"  ↻ 重试{i+1}/{max_retries} ({label})：{exc}，{wait}s 后…")
+                _time_f.sleep(wait)
+    raise RuntimeError(f"重试 {max_retries} 次失败 ({label})：{last_exc}")
+
+
+def analyze_file_funclist_brief(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    skip_if_exists: bool = True,
+) -> dict[int, dict]:
+    """
+    为仓库内每个文件的 funclist 生成 brief（简短摘要），
+    批量写入 file.funclist 的 brief 字段。
+
+    策略：每个文件一次 LLM 批量调用，返回 JSON，
+    从 func.description 生成 brief；若 description 为空则以签名兜底。
+
+    Parameters
+    ----------
+    repo_id        : 目标仓库 id
+    db_path        : SQLite 路径
+    skip_if_exists : True = 跳过 funclist 中已全部有 brief 的文件
+
+    Returns
+    -------
+    dict[int, dict]  {file_id → 更新后的 funclist}
+    """
+    from llm.client  import chat_completion_json
+    from llm.prompts import (
+        ANALYZE_FILE_FUNCLIST_BRIEF_SYSTEM,
+        ANALYZE_FILE_FUNCLIST_BRIEF_USER,
+    )
+
+    _db      = db_path or DB_PATH
+    repo     = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_file_funclist_brief] repo_id={repo_id} 不存在。")
+
+    all_files = FileDB.list_by_repo(repo_id, db_path=_db)
+    print(
+        f"[analyze_file_funclist_brief] 目标仓库：{repo['name']}，"
+        f"共 {len(all_files)} 个文件"
+    )
+
+    result: dict[int, dict] = {}
+    processed = skipped = error = 0
+
+    for file_rec in all_files:
+        file_id   = file_rec["id"]
+        file_name = file_rec["name"]
+        funclist  = file_rec.get("funclist") or []
+        if isinstance(funclist, str):
+            try:
+                import json as _j; funclist = _j.loads(funclist)
+            except Exception:
+                funclist = []
+
+        if not funclist:
+            result[file_id] = []
+            skipped += 1
+            continue
+
+        # skip_if_exists：若所有条目都有非空 brief 则跳过
+        if skip_if_exists and all(e.get("brief") for e in funclist):
+            result[file_id] = funclist
+            skipped += 1
+            continue
+
+        # 收集每个函数的描述（description 或 签名兜底）
+        func_lines: list[str] = []
+        for entry in funclist:
+            fid   = entry.get("func_id")
+            fname = entry.get("name", "")
+            if fid:
+                fn_rec  = FuncDB.get_by_id(fid, db_path=_db)
+                raw_desc = (fn_rec or {}).get("description", "") or ""
+                desc     = raw_desc[:_FILE_MAX_DESC_CHARS]
+                sig      = (fn_rec or {}).get("signature", "")
+            else:
+                desc = ""
+                sig  = fname
+
+            if not desc:
+                desc = f"[签名] {sig}"[:_FILE_MAX_DESC_CHARS]
+
+            func_lines.append(f"func_id={fid}  name={fname}\n描述：{desc}\n")
+
+        func_list_text = "\n---\n".join(func_lines)
+        user_content   = ANALYZE_FILE_FUNCLIST_BRIEF_USER.format(
+            file_name      = file_name,
+            func_count     = len(funclist),
+            func_list_text = func_list_text,
+        )
+        messages = [
+            {"role": "system", "content": ANALYZE_FILE_FUNCLIST_BRIEF_SYSTEM},
+            {"role": "user",   "content": user_content},
+        ]
+
+        try:
+            def _call():
+                return chat_completion_json(messages=messages, temperature=0.1)
+
+            raw = _file_retry(_call, label=f"file_id={file_id} {file_name}")
+        except Exception as exc:
+            print(f"[analyze_file_funclist_brief]   ✗ {file_name}：{exc}")
+            result[file_id] = funclist
+            error += 1
+            continue
+
+        # 解析 briefs
+        briefs_list = raw.get("briefs", []) if isinstance(raw, dict) else []
+        brief_map   = {int(b["func_id"]): b["brief"]
+                       for b in briefs_list
+                       if isinstance(b, dict) and b.get("func_id") is not None}
+
+        # 写回 funclist
+        new_funclist = []
+        for entry in funclist:
+            new_entry = dict(entry)
+            fid = entry.get("func_id")
+            if fid and fid in brief_map:
+                new_entry["brief"] = brief_map[fid]
+            new_funclist.append(new_entry)
+
+        FileDB.update(file_id, db_path=_db, funclist=new_funclist)
+        result[file_id] = new_funclist
+        processed += 1
+        print(
+            f"[analyze_file_funclist_brief]   ✓ {file_name}"
+            f"  funcs={len(new_funclist)}  briefs_updated={len(brief_map)}"
+        )
+
+    print(
+        f"[analyze_file_funclist_brief] ✓ 完成："
+        f"处理={processed}  跳过={skipped}  失败={error}"
+    )
+    return result
+
+
+def analyze_file_description(
+    repo_id: int,
+    db_path: Optional[str] = None,
+    skip_if_exists: bool = True,
+) -> dict[int, str]:
+    """
+    为仓库内每个文件生成自然语言描述，写入 file.description。
+
+    信息来源：文件在 area 中的位置结构 + 函数列表及其 description。
+    依赖：func.description 已完成（Step 12）。
+
+    Parameters
+    ----------
+    repo_id        : 目标仓库 id
+    db_path        : SQLite 路径
+    skip_if_exists : True = 跳过已有 description 的文件
+
+    Returns
+    -------
+    dict[int, str]  {file_id → description_text}
+    """
+    from llm.client  import chat_completion
+    from llm.prompts import (
+        ANALYZE_FILE_DESCRIPTION_SYSTEM,
+        ANALYZE_FILE_DESCRIPTION_USER,
+    )
+    import json as _j
+
+    _db  = db_path or DB_PATH
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_file_description] repo_id={repo_id} 不存在。")
+
+    from db.dao import AreaDB
+    areas     = AreaDB.list_by_repo(repo_id, db_path=_db)
+    area_map  = {a["id"]: a for a in areas}
+
+    all_files = FileDB.list_by_repo(repo_id, db_path=_db)
+    # 按 area 分组，用于构造文件结构上下文
+    files_by_area: dict[int, list[dict]] = {}
+    for f in all_files:
+        files_by_area.setdefault(f["area_id"], []).append(f)
+
+    print(
+        f"[analyze_file_description] 目标仓库：{repo['name']}，"
+        f"共 {len(all_files)} 个文件"
+    )
+
+    result:   dict[int, str] = {}
+    processed = skipped = error = 0
+
+    for file_rec in all_files:
+        file_id   = file_rec["id"]
+        file_name = file_rec["name"]
+        area_id   = file_rec.get("area_id")
+
+        if skip_if_exists and file_rec.get("description"):
+            result[file_id] = file_rec["description"]
+            skipped += 1
+            continue
+
+        area_rec  = area_map.get(area_id, {})
+        area_name = area_rec.get("name", "")
+        area_path = area_rec.get("path", "")
+
+        # 同 area 文件结构
+        sibling_files = files_by_area.get(area_id, [])
+        area_file_structure = "\n".join(
+            f"  {'→ ' if f['id'] == file_id else '  '}{f['name']}  ({f.get('language','')})"
+            for f in sibling_files
+        )
+
+        # 收集函数描述
+        funclist = file_rec.get("funclist") or []
+        if isinstance(funclist, str):
+            try:
+                funclist = _j.loads(funclist)
+            except Exception:
+                funclist = []
+
+        func_desc_parts: list[str] = []
+        for entry in funclist[:40]:   # 最多 40 个函数
+            fid   = entry.get("func_id")
+            fname = entry.get("name", "")
+            brief = entry.get("brief", "")
+            if fid:
+                fn_rec = FuncDB.get_by_id(fid, db_path=_db)
+                desc   = (fn_rec or {}).get("description", "") or ""
+                desc   = desc[:400]
+            else:
+                desc = ""
+            func_desc_parts.append(
+                f"### {fname}\n{brief or desc or '（暂无描述）'}"
+            )
+        func_descriptions = "\n\n".join(func_desc_parts) or "（无函数记录）"
+
+        user_content = ANALYZE_FILE_DESCRIPTION_USER.format(
+            file_name          = file_name,
+            language           = file_rec.get("language", "Unknown"),
+            area_name          = area_name,
+            area_path          = area_path,
+            file_path          = file_rec.get("path", ""),
+            area_file_structure= area_file_structure,
+            func_descriptions  = func_descriptions,
+        )
+        messages = [
+            {"role": "system", "content": ANALYZE_FILE_DESCRIPTION_SYSTEM},
+            {"role": "user",   "content": user_content},
+        ]
+
+        try:
+            def _call():
+                return chat_completion(messages=messages, temperature=0.2)
+
+            desc = _file_retry(_call, label=f"file_id={file_id} {file_name}")
+            desc = desc.strip()
+        except Exception as exc:
+            print(f"[analyze_file_description]   ✗ {file_name}：{exc}")
+            result[file_id] = ""
+            error += 1
+            continue
+
+        FileDB.update(file_id, db_path=_db, description=desc)
+        result[file_id] = desc
+        processed += 1
+        print(f"[analyze_file_description]   ✓ {file_name}  ({len(desc)} 字符)")
+
+    print(
+        f"[analyze_file_description] ✓ 完成："
+        f"处理={processed}  跳过={skipped}  失败={error}"
+    )
+    return result

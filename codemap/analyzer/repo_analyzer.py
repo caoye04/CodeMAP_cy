@@ -640,3 +640,237 @@ def analyze_repo_area(
         f"repo.arealist 已更新。"
     )
     return validated
+
+# ─────────────────────────────────────────────
+# Step 17: analyze_repo_arealist_brief
+# Step 18: analyze_repo_description
+
+import time as _time_r
+from typing import Optional
+
+_REPO_MAX_AREA_DESC  = 600
+_REPO_MAX_RETRIES    = 5
+_REPO_RETRY_DELAYS   = (2, 5, 10, 20, 40)
+
+
+def _repo_retry(fn, label: str = "", max_retries: int = _REPO_MAX_RETRIES):
+    last_exc = None
+    for i in range(max_retries):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if i < max_retries - 1:
+                wait = _REPO_RETRY_DELAYS[min(i, len(_REPO_RETRY_DELAYS)-1)]
+                print(f"  ↻ 重试{i+1}/{max_retries} ({label})：{exc}，{wait}s 后…")
+                _time_r.sleep(wait)
+    raise RuntimeError(f"重试 {max_retries} 次失败 ({label})：{last_exc}")
+
+
+def analyze_repo_arealist_brief(
+    repo_id: int,
+    db_path: str | None = None,
+    skip_if_exists: bool = True,
+) -> list[dict]:
+    """
+    为 repo.arealist 中每个 area 生成 brief，写回 repo.arealist。
+
+    依赖：area.description 已完成（Step 16）。
+
+    Returns
+    -------
+    list[dict]  更新后的 arealist
+    """
+    from llm.client  import chat_completion_json
+    from llm.prompts import (
+        ANALYZE_REPO_AREALIST_BRIEF_SYSTEM,
+        ANALYZE_REPO_AREALIST_BRIEF_USER,
+    )
+    import json as _j
+
+    _db  = db_path or DB_PATH
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_repo_arealist_brief] repo_id={repo_id} 不存在。")
+
+    arealist = repo.get("arealist") or []
+    if isinstance(arealist, str):
+        try:
+            arealist = _j.loads(arealist)
+        except Exception:
+            arealist = []
+
+    if not arealist:
+        print("[analyze_repo_arealist_brief] arealist 为空，跳过。")
+        return []
+
+    if skip_if_exists and all(e.get("brief") for e in arealist):
+        print("[analyze_repo_arealist_brief] 所有 area 已有 brief，跳过。")
+        return arealist
+
+    # 收集各 area 描述
+    area_lines: list[str] = []
+    for entry in arealist:
+        aid   = entry.get("area_id")
+        aname = entry.get("name", "")
+        if aid:
+            area_rec = AreaDB.get_by_id(aid, db_path=_db)
+            desc     = (area_rec or {}).get("description", "") or ""
+            desc     = desc[:_REPO_MAX_AREA_DESC]
+        else:
+            desc = ""
+        if not desc:
+            desc = f"[area 名称] {aname}"
+        area_lines.append(f"area_id={aid}  name={aname}\n描述：{desc}\n")
+
+    area_list_text = "\n---\n".join(area_lines)
+    user_content   = ANALYZE_REPO_AREALIST_BRIEF_USER.format(
+        repo_name      = repo["name"],
+        area_count     = len(arealist),
+        area_list_text = area_list_text,
+    )
+    messages = [
+        {"role": "system", "content": ANALYZE_REPO_AREALIST_BRIEF_SYSTEM},
+        {"role": "user",   "content": user_content},
+    ]
+
+    try:
+        def _call():
+            return chat_completion_json(messages=messages, temperature=0.1)
+
+        raw = _repo_retry(_call, label=f"repo={repo['name']} arealist_brief")
+    except Exception as exc:
+        print(f"[analyze_repo_arealist_brief] ✗ LLM 调用失败：{exc}")
+        return arealist
+
+    briefs_list = raw.get("briefs", []) if isinstance(raw, dict) else []
+    brief_map   = {int(b["area_id"]): b["brief"]
+                   for b in briefs_list
+                   if isinstance(b, dict) and b.get("area_id") is not None}
+
+    new_arealist = []
+    for entry in arealist:
+        new_entry = dict(entry)
+        aid = entry.get("area_id")
+        if aid and aid in brief_map:
+            new_entry["brief"] = brief_map[aid]
+        new_arealist.append(new_entry)
+
+    RepoDB.update(repo_id, db_path=_db, arealist=new_arealist)
+    print(
+        f"[analyze_repo_arealist_brief] ✓ 完成："
+        f"areas={len(new_arealist)}  briefs_updated={len(brief_map)}"
+    )
+    return new_arealist
+
+
+def analyze_repo_description(
+    repo_id: int,
+    db_path: str | None = None,
+    skip_if_exists: bool = True,
+) -> str:
+    """
+    为仓库生成自然语言描述，写入 repo.description。
+
+    依赖：area.description 已完成（Step 16）。
+
+    Returns
+    -------
+    str  仓库描述文本
+    """
+    from llm.client  import chat_completion
+    from llm.prompts import (
+        ANALYZE_REPO_DESCRIPTION_SYSTEM,
+        ANALYZE_REPO_DESCRIPTION_USER,
+    )
+    import json as _j
+
+    _db  = db_path or DB_PATH
+    repo = RepoDB.get_by_id(repo_id, db_path=_db)
+    if repo is None:
+        raise ValueError(f"[analyze_repo_description] repo_id={repo_id} 不存在。")
+
+    if skip_if_exists and repo.get("description"):
+        print(
+            f"[analyze_repo_description] '{repo['name']}' 已有描述，跳过。"
+        )
+        return repo["description"]
+
+    repo_path = repo["path"]
+    repo_name = repo["name"]
+
+    # 语言信息
+    language_info = repo.get("language") or {}
+    if isinstance(language_info, str):
+        try:
+            language_info = _j.loads(language_info)
+        except Exception:
+            language_info = {}
+    main_language  = language_info.get("main", "Unknown")
+    lang_stats_raw = language_info.get("stats", [])
+    language_stats = "，".join(
+        f"{s['lang']} {s['pct']}%" for s in lang_stats_raw[:6]
+    )
+
+    # 目录树
+    dir_tree = _build_dir_tree(repo_path, max_depth=3)
+
+    # README
+    readme_content = _read_readme(repo_path)
+
+    # area 结构 + 描述
+    areas      = AreaDB.list_by_repo(repo_id, db_path=_db)
+    arealist   = repo.get("arealist") or []
+    if isinstance(arealist, str):
+        try:
+            arealist = _j.loads(arealist)
+        except Exception:
+            arealist = []
+
+    brief_map  = {e.get("area_id"): e.get("brief", "") for e in arealist}
+
+    area_structure_lines: list[str] = []
+    area_desc_parts:      list[str] = []
+
+    for area in areas:
+        aid   = area["id"]
+        aname = area["name"]
+        apath = area["path"]
+        brief = brief_map.get(aid, "")
+        area_structure_lines.append(f"  [{aname}]  path={apath}  {brief}")
+
+        desc = area.get("description", "") or ""
+        area_desc_parts.append(
+            f"### {aname}（{apath}）\n{desc[:_REPO_MAX_AREA_DESC] or '（暂无描述）'}"
+        )
+
+    area_structure  = "\n".join(area_structure_lines) or "（无 area 记录）"
+    area_descriptions = "\n\n".join(area_desc_parts) or "（无 area 描述）"
+
+    user_content = ANALYZE_REPO_DESCRIPTION_USER.format(
+        repo_name         = repo_name,
+        main_language     = main_language,
+        language_stats    = language_stats or "（未知）",
+        dir_tree          = dir_tree,
+        area_structure    = area_structure,
+        readme_content    = readme_content,
+        area_descriptions = area_descriptions,
+    )
+    messages = [
+        {"role": "system", "content": ANALYZE_REPO_DESCRIPTION_SYSTEM},
+        {"role": "user",   "content": user_content},
+    ]
+
+    try:
+        def _call():
+            return chat_completion(messages=messages, temperature=0.2)
+
+        desc = _repo_retry(_call, label=f"repo={repo_name} description")
+        desc = desc.strip()
+    except Exception as exc:
+        print(f"[analyze_repo_description] ✗ LLM 调用失败：{exc}")
+        return ""
+
+    RepoDB.update(repo_id, db_path=_db, description=desc)
+    print(f"[analyze_repo_description] ✓ 完成：{len(desc)} 字符")
+    return desc
