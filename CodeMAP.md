@@ -1,3 +1,17 @@
+你好！这是我目前的CodeMAP项目情况，我需要对已有代码进行改动： 简化目前的摘要内容（如precondition、description、postcondition、exception等），去除不相关的信息。 
+
+起因是目前的算法逻辑是：每次生成一个函数的相关信息，都要单独调用一次接口，消耗太大了。 
+
+我希望改成，在一个接口内生成该函数的precondition、description、postcondition、exception信息并存入。这样就可以把四次调用缩减成一次了
+
+ 同时我希望更改所有涉及precondition、description、postcondition、exception、brief的提示词，目前都太复杂了，不用给ai限定太多，让它以精简达意的逻辑给出格式合适的返回即可。（但是请注意，你给我提示词文件的时候不用直接给我一整个文件，一块一块的返回给我就行，这样能保证回答不会乱码）
+
+以及请注意我的函数descrpition生成已经完全简化了，所以不需要Agent的代码和对应提示词，可以删掉：Propmt： analyze_func_description —— 函数描述 Agent
+
+ 我在想可能就是更改Step7：`analyze_func_precondition`和`analyze_func_postcondition`和`analyze_func_exception`实现、Step8：all descrption and brief这里的相关代码？ 请你帮我修改对应代码！非常感谢
+
+
+
 # CodeMAP项目
 
 > CaoYe
@@ -81,7 +95,7 @@
 codemap/
 ├── README.md
 ├── requirements.txt
-├── config.py                    # 全局配置（API Key、模型、CodeQL路径等）
+├── config.py                    # 全局配置（API Key、模型）
 ├── main.py                      # build_codemap 主流程入口
 ├── cli.py                       # 命令行工具（get_* 系列接口）
 │
@@ -6493,393 +6507,6 @@ def analyze_func_exception(
     )
 ```
 
-`test/mainbuild_step0-7`
-
-```
-"""
-test/mainbuild_step0-7.py
-
-对 minizip-ng 完整执行 Step 0-7 构建流程，不限制处理函数数量。
-
-──────────────────────────────────────────────────────────────────────
-执行顺序
-──────────────────────────────────────────────────────────────────────
-  Step 0 : init_repo
-  Step 1 : analyze_repo_language
-  Step 2 : analyze_repo_area                        （LLM）
-  Step 3 : analyze_area_file
-  Step 4 : analyze_file_language + analyze_file_func
-  Step 5 : build_callgraph
-  Step 6 : analyze_func_callgraph
-  Step 7 : analyze_func_precondition  ─┐
-           analyze_func_postcondition  ├─ ThreadPoolExecutor 三路并行
-           analyze_func_exception     ─┘
-
-──────────────────────────────────────────────────────────────────────
-并行策略（Step 7）
-──────────────────────────────────────────────────────────────────────
-  · 三种分析写入 DB 的列不同（precondition / postcondition / exception），
-    无行级写-写冲突，可安全并发。
-  · LLM 调用为网络 I/O，Python GIL 在 socket.recv 阻塞时主动释放，
-    线程真正并发，无需 multiprocessing。
-  · DB 启用 WAL 模式：读不阻塞写，写操作由 SQLite 内部串行化，
-    不会出现 SQLITE_BUSY 或数据损坏。
-  · 理论加速比 ≈ ×3（取决于 LLM 端的并发上限）。
-  · 若遇 API 限速错误，将 MAX_STEP7_WORKERS 调低为 2 或 1。
-
-──────────────────────────────────────────────────────────────────────
-断点续建
-──────────────────────────────────────────────────────────────────────
-  默认使用 skip_if_exists=True：DB 中已有数据的函数自动跳过，
-  中断后重新执行脚本不会重复调用 LLM。
-  使用 --force 可清空 DB 重新全量构建。
-
-──────────────────────────────────────────────────────────────────────
-输出
-──────────────────────────────────────────────────────────────────────
-  数据库 : data/test_db/db_minizip-ng_main.db
-  日志   : test/log/mainbuild_<YYYYMMDD_HHMMSS>.log
-
-──────────────────────────────────────────────────────────────────────
-运行
-──────────────────────────────────────────────────────────────────────
-  python test/mainbuild_step0-7.py
-  python test/mainbuild_step0-7.py --force   # 清空旧 DB 后重建
-"""
-
-import argparse
-import logging
-import os
-import sqlite3
-import sys
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-
-# ── 路径 ─────────────────────────────────────────────────────────────────────
-_HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-
-from db.dao import init_db, FuncDB, FileDB
-from analyzer.repo_analyzer     import init_repo, analyze_repo_language, analyze_repo_area
-from analyzer.area_analyzer     import analyze_area_file
-from analyzer.file_analyzer     import analyze_file_language, analyze_file_func
-from analyzer.callgraph_builder import build_callgraph, analyze_func_callgraph
-from analyzer.func_analyzer     import (
-    analyze_func_precondition,
-    analyze_func_postcondition,
-    analyze_func_exception,
-)
-from config import DATA_DIR
-
-# ── 配置 ─────────────────────────────────────────────────────────────────────
-
-_REPO_PATH = os.path.abspath(
-    os.path.join(_HERE, '../../../repo_4_codemap/minizip-ng')
-)
-_DB_DIR  = os.path.join(DATA_DIR, 'test_db')
-_DB_PATH = os.path.join(_DB_DIR, 'db_minizip-ng_main.db')
-
-# Step 7 并行工作线程数
-#   3 → 三路同时调用 LLM，约 ×3 加速（推荐）
-#   2 → 遇 API 限速时降级
-#   1 → 完全串行，用于排查问题
-MAX_STEP7_WORKERS = 3
-
-
-# ── 日志 ─────────────────────────────────────────────────────────────────────
-
-def _setup_logger() -> logging.Logger:
-    log_dir = os.path.join(_HERE, 'log')
-    os.makedirs(log_dir, exist_ok=True)
-    ts       = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = os.path.join(log_dir, f'mainbuild_{ts}.log')
-
-    logger = logging.getLogger('mainbuild')
-    logger.setLevel(logging.DEBUG)
-
-    if not logger.handlers:
-        fh = logging.FileHandler(log_file, encoding='utf-8')
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(
-            '%(asctime)s  %(levelname)-7s  %(message)s', datefmt='%H:%M:%S'
-        ))
-
-        ch = logging.StreamHandler(sys.stdout)
-        ch.setLevel(logging.INFO)
-        ch.setFormatter(logging.Formatter(
-            '%(asctime)s  %(message)s', datefmt='%H:%M:%S'
-        ))
-
-        logger.addHandler(fh)
-        logger.addHandler(ch)
-
-    logger.info('=' * 70)
-    logger.info('minizip-ng  全量构建  Step 0-7')
-    logger.info(f'仓库  : {_REPO_PATH}')
-    logger.info(f'DB    : {_DB_PATH}')
-    logger.info(f'日志  : {log_file}')
-    logger.info(f'Step7 并行度 : MAX_STEP7_WORKERS = {MAX_STEP7_WORKERS}')
-    logger.info('=' * 70)
-    return logger
-
-
-_log = _setup_logger()
-
-
-# ── SQLite WAL 模式 ───────────────────────────────────────────────────────────
-
-def _enable_wal(db_path: str) -> None:
-    """
-    开启 WAL（Write-Ahead Logging）日志模式。
-
-    Step 7 三路线程并发写入同一 DB 时，默认 DELETE 模式会频繁触发
-    SQLITE_BUSY。WAL 模式下写操作在 SQLite 内部串行化，各线程无需
-    额外加锁即可安全并发。synchronous=NORMAL 在安全性与性能间取平衡。
-    """
-    with sqlite3.connect(db_path) as conn:
-        mode = conn.execute('PRAGMA journal_mode=WAL').fetchone()[0]
-        conn.execute('PRAGMA synchronous=NORMAL')
-    _log.debug(f'[WAL] journal_mode = {mode}')
-
-
-# ── 计时上下文管理器 ─────────────────────────────────────────────────────────
-
-class _Timer:
-    """with _Timer('Step N  xxx'): ..."""
-
-    def __init__(self, label: str):
-        self._label = label
-        self._t0    = 0.0
-
-    def __enter__(self):
-        self._t0 = time.time()
-        _log.info(f'▶ {self._label}')
-        return self
-
-    def __exit__(self, *_):
-        elapsed     = time.time() - self._t0
-        mins, secs  = divmod(int(elapsed), 60)
-        duration    = f'{mins}m {secs}s' if mins else f'{secs}s'
-        _log.info(f'◀ {self._label}  耗时 {duration}')
-
-
-# ── 获取全量 C 函数 ID ────────────────────────────────────────────────────────
-
-def _get_all_c_func_ids(repo_id: int) -> list[int]:
-    """
-    返回仓库内所有 C 语言函数的 func_id 列表，不设数量上限。
-    排列顺序：有 callee（有实际调用）的函数优先，其余追加其后。
-    """
-    all_files  = FileDB.list_by_repo(repo_id, db_path=_DB_PATH)
-    c_file_ids = {f['id'] for f in all_files if f.get('language') == 'C'}
-
-    all_funcs  = FuncDB.list_by_repo(repo_id, db_path=_DB_PATH)
-
-    with_callee = [
-        f for f in all_funcs
-        if f.get('file_id') in c_file_ids
-        and isinstance(f.get('callgraph'), dict)
-        and f['callgraph'].get('callees')
-    ]
-    wc_ids = {f['id'] for f in with_callee}
-    without_callee = [
-        f for f in all_funcs
-        if f.get('file_id') in c_file_ids and f['id'] not in wc_ids
-    ]
-
-    ids = [f['id'] for f in with_callee + without_callee]
-    _log.info(
-        f'[func_ids]  C 函数共 {len(ids)} 个'
-        f'（有 callee={len(with_callee)}，无 callee={len(without_callee)}）'
-    )
-    return ids
-
-
-# ── Step 7 并行分析 ───────────────────────────────────────────────────────────
-
-def _run_step7_parallel(
-    repo_id: int,
-    func_ids: list[int],
-) -> tuple[dict, dict, dict]:
-    """
-    用 ThreadPoolExecutor 并行执行三路 Step 7 分析。
-
-    skip_if_exists=True：DB 中已有数据的函数自动跳过，
-    支持中断后重新执行脚本续建，不会重复调用 LLM。
-    """
-    task_defs = [
-        ('precondition',  analyze_func_precondition),
-        ('postcondition', analyze_func_postcondition),
-        ('exception',     analyze_func_exception),
-    ]
-    results: dict[str, dict] = {}
-    t0 = time.time()
-
-    _log.info(
-        f'  三路并行启动'
-        f'（workers={MAX_STEP7_WORKERS}，目标函数={len(func_ids)} 个）'
-    )
-
-    with ThreadPoolExecutor(
-        max_workers=MAX_STEP7_WORKERS,
-        thread_name_prefix='step7',
-    ) as pool:
-        future_to_name = {
-            pool.submit(
-                fn,
-                repo_id,
-                db_path=_DB_PATH,
-                func_ids=func_ids,
-                skip_if_exists=True,
-            ): name
-            for name, fn in task_defs
-        }
-
-        for future in as_completed(future_to_name):
-            name = future_to_name[future]
-            try:
-                r        = future.result()
-                nonempty = sum(1 for v in r.values() if v)
-                results[name] = r
-                _log.info(
-                    f'  ✓ {name:<15s}  写库={len(r)} 个'
-                    f'  有数据={nonempty}/{len(r)}'
-                    f'  已耗时={time.time() - t0:.0f}s'
-                )
-            except Exception as exc:
-                _log.error(f'  ✗ {name} 发生异常：{exc}', exc_info=True)
-                results[name] = {}
-
-    _log.info(f'  三路分析全部完成，总耗时 {time.time() - t0:.1f}s')
-    return (
-        results.get('precondition',  {}),
-        results.get('postcondition', {}),
-        results.get('exception',     {}),
-    )
-
-
-# ── 汇总报告 ─────────────────────────────────────────────────────────────────
-
-def _print_summary(
-    pre: dict, post: dict, exc: dict, total_elapsed: float
-) -> None:
-    def _stats(d: dict) -> tuple[int, int, float]:
-        total    = len(d)
-        nonempty = sum(1 for v in d.values() if v)
-        avg_len  = (
-            sum(len(v) for v in d.values() if v) / nonempty
-            if nonempty else 0.0
-        )
-        return nonempty, total, avg_len
-
-    mins, secs = divmod(int(total_elapsed), 60)
-
-    _log.info('')
-    _log.info('=' * 70)
-    _log.info('构建完成  汇总报告')
-    _log.info(f'  DB       : {_DB_PATH}')
-    _log.info(f'  总耗时   : {mins}m {secs}s  ({total_elapsed:.0f}s)')
-    _log.info('  ─── Step 7 覆盖率 ───────────────────────────────────────')
-    for label, d in [
-        ('precondition',  pre),
-        ('postcondition', post),
-        ('exception',     exc),
-    ]:
-        ne, tot, avg = _stats(d)
-        pct = ne / tot * 100 if tot else 0.0
-        _log.info(
-            f'  {label:<15s}: 有数据={ne}/{tot} ({pct:.0f}%)'
-            f'  平均条数={avg:.1f}'
-        )
-    _log.info('=' * 70)
-
-
-# ── 主流程 ────────────────────────────────────────────────────────────────────
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description='minizip-ng 全量构建 Step 0-7（无函数数量限制）',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例：
-  python test/mainbuild_step0-7.py           # 增量续建（已有数据跳过）
-  python test/mainbuild_step0-7.py --force   # 删除旧 DB 后重建
-        """.strip(),
-    )
-    parser.add_argument(
-        '--force', action='store_true',
-        help='删除旧 DB 后重建（默认：增量续建，已有数据自动跳过）',
-    )
-    args = parser.parse_args()
-
-    # ── 前置检查 ──────────────────────────────────────────────────────────────
-    if not os.path.isdir(_REPO_PATH):
-        _log.error(f'仓库路径不存在，请确认：{_REPO_PATH}')
-        sys.exit(1)
-
-    # ── 准备 DB ───────────────────────────────────────────────────────────────
-    os.makedirs(_DB_DIR, exist_ok=True)
-    if args.force and os.path.exists(_DB_PATH):
-        os.remove(_DB_PATH)
-        _log.info('[--force] 已删除旧数据库，将全量重建')
-
-    init_db(_DB_PATH)
-    _enable_wal(_DB_PATH)
-
-    total_t0 = time.time()
-
-    # ── Step 0：初始化仓库 ────────────────────────────────────────────────────
-    with _Timer('Step 0  init_repo'):
-        repo_id = init_repo(_REPO_PATH, db_path=_DB_PATH)
-    _log.info(f'  repo_id = {repo_id}')
-
-    # ── Step 1：仓库语言统计 ──────────────────────────────────────────────────
-    with _Timer('Step 1  analyze_repo_language'):
-        lang_r = analyze_repo_language(repo_id, db_path=_DB_PATH)
-    _log.info(f'  主语言 : {lang_r.get("main")}')
-
-    # ── Step 2：模块/区域划分（LLM）──────────────────────────────────────────
-    with _Timer('Step 2  analyze_repo_area  [LLM]'):
-        area_r = analyze_repo_area(repo_id, db_path=_DB_PATH)
-    _log.info(f'  area 数 : {len(area_r)}')
-
-    # ── Step 3：文件归属 ──────────────────────────────────────────────────────
-    with _Timer('Step 3  analyze_area_file'):
-        file_r = analyze_area_file(repo_id, db_path=_DB_PATH)
-    _log.info(f'  file 数 : {sum(len(v) for v in file_r.values())}')
-
-    # ── Step 4：文件语言识别 + 函数提取 ──────────────────────────────────────
-    with _Timer('Step 4  analyze_file_language + analyze_file_func'):
-        analyze_file_language(repo_id, db_path=_DB_PATH)
-        func_r = analyze_file_func(repo_id, db_path=_DB_PATH)
-    _log.info(f'  func 数 : {sum(len(v) for v in func_r.values())}')
-
-    # ── Step 5：构建调用图 ────────────────────────────────────────────────────
-    with _Timer('Step 5  build_callgraph'):
-        cg_path = build_callgraph(repo_id, db_path=_DB_PATH)
-    _log.info(f'  callgraph : {cg_path}')
-
-    # ── Step 6：写入调用关系 ──────────────────────────────────────────────────
-    with _Timer('Step 6  analyze_func_callgraph'):
-        cg_r = analyze_func_callgraph(
-            repo_id, db_path=_DB_PATH, callgraph_path=cg_path
-        )
-    _log.info(f'  callgraph 写库 : {len(cg_r)} 个函数')
-
-    # ── Step 7：前置/后置/异常分析（三路并行）────────────────────────────────
-    func_ids = _get_all_c_func_ids(repo_id)
-    with _Timer('Step 7  precondition / postcondition / exception  [LLM × 3 并行]'):
-        pre, post, exc = _run_step7_parallel(repo_id, func_ids)
-
-    # ── 汇总 ──────────────────────────────────────────────────────────────────
-    _print_summary(pre, post, exc, time.time() - total_t0)
-
-
-if __name__ == '__main__':
-    main()
-```
-
 ### Step8：all descrption and brief
 
 `llm/prompt`（增加）
@@ -8597,355 +8224,973 @@ def analyze_repo_description(
     return desc
 ```
 
-`test/mainbuild_step12-18.py`
+`main.py`
 
 ```
 """
-test/mainbuild_step12-18.py
+main.py
+CodeMAP 主流程入口 —— build_codemap
 
-在已有 Step 0-7 数据库基础上，为 minizip-ng 补充完成 后续 的全量描述生成。
+将 Step 1-18 完整串联，从仓库路径构建完整的结构化代码知识库。
 
-──────────────────────────────────────────────────────────────────────
-执行顺序（均支持断点续建，skip_if_exists=True）
-──────────────────────────────────────────────────────────────────────
-  Step 12 : analyze_func_description        [Agent × parallel 10，重试5次]
-  Step 13 : analyze_file_funclist_brief     [LLM batch per file，重试5次]
-  Step 14 : analyze_file_description        [LLM per file，重试5次]
-  Step 15 : analyze_area_filelist_brief     [LLM batch per area，重试5次]
-  Step 16 : analyze_area_description        [LLM per area，重试5次]
-  Step 17 : analyze_repo_arealist_brief     [LLM batch，重试5次]
-  Step 18 : analyze_repo_description        [LLM，重试5次]
+算法步骤对应关系
+────────────────────────────────────────────────────────────────────
+  Step  1 : init_repo
+  Step  2 : analyze_repo_language
+  Step  3 : analyze_repo_area                        [LLM]
+  Step  4 : analyze_area_file
+  Step  5 : analyze_file_language
+  Step  6 : analyze_file_func
+  Step  7 : build_callgraph
+  Step  8 : analyze_func_callgraph
+  Step  9 : analyze_func_precondition                [SA+LLM，与10/11并行]
+  Step 10 : analyze_func_postcondition               [SA+LLM，与9/11并行]
+  Step 11 : analyze_func_exception                   [SA+LLM，与9/10并行]
+  Step 12 : analyze_func_description                 [Agent，多函数并行]
+  Step 13 : analyze_file_funclist_brief              [LLM batch]
+  Step 14 : analyze_file_description                 [LLM]
+  Step 15 : analyze_area_filelist_brief              [LLM batch]
+  Step 16 : analyze_area_description                 [LLM]
+  Step 17 : analyze_repo_arealist_brief              [LLM batch]
+  Step 18 : analyze_repo_description                 [LLM]
+  Step 19 : build_codemap  ← 本文件（串联 1-18）
 
+命令行用法
 ──────────────────────────────────────────────────────────────────────
-前置条件
-──────────────────────────────────────────────────────────────────────
-  已完成 Step 0-7，数据库存在于：
-    data/test_db/db_minizip-ng_main.db
+  # 首次全量分析（使用默认数据库路径）
+  python main.py /path/to/repo
 
-──────────────────────────────────────────────────────────────────────
-断点续建
-──────────────────────────────────────────────────────────────────────
-  默认 skip_if_exists=True：DB 中已有描述的实体自动跳过。
-  --force  重新生成所有描述（不删除 DB，仅覆盖写入）。
-  --step N 只执行从第 N 步开始（如 --step 14 跳过前3步）。
+  # 强制重建（清空同名仓库旧数据后重建）
+  python main.py /path/to/repo --force
 
-──────────────────────────────────────────────────────────────────────
-输出
-──────────────────────────────────────────────────────────────────────
-  复用数据库 : data/test_db/db_minizip-ng_main.db
-  日志       : test/log/mainbuild_step12-18_<YYYYMMDD_HHMMSS>.log
+  # 断点续建：从 Step 12 开始（跳过已完成的 1-11）
+  python main.py /path/to/repo --step 12
 
-──────────────────────────────────────────────────────────────────────
-运行
-──────────────────────────────────────────────────────────────────────
-  python test/mainbuild_step12-18.py
-  python test/mainbuild_step12-18.py --force
-  python test/mainbuild_step12-18.py --step 14
-  python test/mainbuild_step12-18.py --force --step 16
+  # 指定仓库名和数据库路径
+  python main.py /path/to/repo --repo-name my_project --db-path ./my.db
+
+  # 只分析 C/C++ 函数（大幅减少 LLM 分析量）
+  python main.py /path/to/repo --languages C C++
+
+  # 只做结构化分析，跳过描述生成（Step 12-18）
+  python main.py /path/to/repo --no-desc
+
+  # API 限速时降低并发度
+  python main.py /path/to/repo --workers-step9-11 1 --workers-step12 3
 """
 
 import argparse
 import logging
 import os
+import sqlite3
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from typing import Optional
 
-# ── 路径 ─────────────────────────────────────────────────────────────────────
+# ── 路径设置 ─────────────────────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
+sys.path.insert(0, _HERE)
 
-from db.dao  import RepoDB, FuncDB, FileDB
-from config  import DATA_DIR
+from config import DB_PATH, DATA_DIR
+from db.dao import init_db, RepoDB, FuncDB, FileDB
 
-from analyzer.func_analyzer  import analyze_func_description
-from analyzer.file_analyzer  import (
-    analyze_file_funclist_brief,
-    analyze_file_description,
-)
-from analyzer.area_analyzer  import (
-    analyze_area_filelist_brief,
-    analyze_area_description,
-)
-from analyzer.repo_analyzer  import (
+from analyzer.repo_analyzer import (
+    init_repo,
+    analyze_repo_language,
+    analyze_repo_area,
     analyze_repo_arealist_brief,
     analyze_repo_description,
 )
+from analyzer.area_analyzer import (
+    analyze_area_file,
+    analyze_area_filelist_brief,
+    analyze_area_description,
+)
+from analyzer.file_analyzer import (
+    analyze_file_language,
+    analyze_file_func,
+    analyze_file_funclist_brief,
+    analyze_file_description,
+)
+from analyzer.callgraph_builder import build_callgraph, analyze_func_callgraph
+from analyzer.func_analyzer import (
+    analyze_func_precondition,
+    analyze_func_postcondition,
+    analyze_func_exception,
+    analyze_func_description,
+)
 
-# ── 配置 ─────────────────────────────────────────────────────────────────────
 
-_DB_PATH = os.path.join(DATA_DIR, 'test_db', 'db_minizip-ng_main.db')
+# ==================================================================
+# 日志配置
+# ==================================================================
 
-# Step 12 并发度（Agent per func）
-FUNC_DESC_WORKERS = 10
+def _make_logger(
+    log_dir: Optional[str] = None,
+) -> tuple[logging.Logger, str]:
+    """
+    创建构建日志器，同时输出到控制台（INFO）和日志文件（DEBUG）。
 
+    Returns
+    -------
+    (logger, log_file_path)
+    """
+    _log_dir = log_dir or os.path.join(_HERE, 'logs')
+    os.makedirs(_log_dir, exist_ok=True)
 
-# ── 日志 ─────────────────────────────────────────────────────────────────────
-
-def _setup_logger() -> logging.Logger:
-    log_dir  = os.path.join(_HERE, 'log')
-    os.makedirs(log_dir, exist_ok=True)
     ts       = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = os.path.join(log_dir, f'mainbuild_step12-18_{ts}.log')
+    log_file = os.path.join(_log_dir, f'codemap_{ts}.log')
 
-    logger = logging.getLogger('mainbuild_step12-18')
+    # 使用时间戳命名避免多次调用时 handler 重叠
+    logger = logging.getLogger(f'codemap_{ts}')
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False
 
-    if not logger.handlers:
-        fh = logging.FileHandler(log_file, encoding='utf-8')
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(
-            '%(asctime)s  %(levelname)-7s  %(message)s', datefmt='%H:%M:%S'
-        ))
-        ch = logging.StreamHandler(sys.stdout)
-        ch.setLevel(logging.INFO)
-        ch.setFormatter(logging.Formatter(
-            '%(asctime)s  %(message)s', datefmt='%H:%M:%S'
-        ))
-        logger.addHandler(fh)
-        logger.addHandler(ch)
+    fh = logging.FileHandler(log_file, encoding='utf-8')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        '%(asctime)s  %(levelname)-7s  %(message)s',
+        datefmt='%H:%M:%S',
+    ))
 
-    logger.info('=' * 70)
-    logger.info('minizip-ng  Step 8 描述生成  (基于已有 Step 0-7 数据库)')
-    logger.info(f'DB   : {_DB_PATH}')
-    logger.info(f'日志 : {log_file}')
-    logger.info('=' * 70)
-    return logger
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter(
+        '%(asctime)s  %(message)s',
+        datefmt='%H:%M:%S',
+    ))
 
+    logger.addHandler(fh)
+    logger.addHandler(ch)
 
-_log = _setup_logger()
+    return logger, log_file
 
 
-# ── 计时上下文 ────────────────────────────────────────────────────────────────
+# ==================================================================
+# 工具函数
+# ==================================================================
+
+def _enable_wal(db_path: str, logger: logging.Logger) -> None:
+    """
+    开启 SQLite WAL（Write-Ahead Logging）模式。
+
+    Step 9-11 三路线程并发写入同一数据库时，
+    WAL 模式下 SQLite 内部串行化写操作，防止 SQLITE_BUSY 冲突。
+    """
+    try:
+        with sqlite3.connect(db_path) as conn:
+            mode = conn.execute('PRAGMA journal_mode=WAL').fetchone()[0]
+            conn.execute('PRAGMA synchronous=NORMAL')
+        logger.debug(f'[WAL] journal_mode = {mode}')
+    except Exception as e:
+        logger.warning(f'[WAL] 开启失败（不影响功能）：{e}')
+
 
 class _Timer:
-    def __init__(self, label: str):
-        self._label = label
-        self._t0    = 0.0
+    """计时上下文管理器：打印步骤标签、开始/结束及耗时。"""
+
+    def __init__(self, label: str, logger: logging.Logger):
+        self._label  = label
+        self._t0     = 0.0
+        self._logger = logger
 
     def __enter__(self):
         self._t0 = time.time()
-        _log.info(f'▶ {self._label}')
+        self._logger.info(f'▶ {self._label}')
         return self
 
-    def __exit__(self, *_):
-        elapsed     = time.time() - self._t0
-        mins, secs  = divmod(int(elapsed), 60)
-        duration    = f'{mins}m {secs}s' if mins else f'{secs}s'
-        _log.info(f'◀ {self._label}  耗时 {duration}')
+    def __exit__(self, exc_type, *_):
+        elapsed    = time.time() - self._t0
+        mins, secs = divmod(int(elapsed), 60)
+        duration   = f'{mins}m {secs}s' if mins else f'{secs}s'
+        icon       = '✓' if exc_type is None else '✗'
+        self._logger.info(f'◀ {icon} {self._label}  耗时 {duration}')
 
 
-# ── 统计工具 ──────────────────────────────────────────────────────────────────
+def _find_repo_id(
+    repo_name: str,
+    repo_path: str,
+    db_path: str,
+) -> Optional[int]:
+    """
+    断点续建时，从数据库中定位已有仓库记录 ID。
+    先按名称精确匹配，再按绝对路径兜底。
+    """
+    rec = RepoDB.get_by_name(repo_name, db_path=db_path)
+    if rec:
+        return rec['id']
 
-def _count_nonempty(d: dict) -> tuple[int, int]:
-    """返回 (有数据数量, 总数量)"""
-    total    = len(d)
-    nonempty = sum(1 for v in d.values() if v)
-    return nonempty, total
+    abs_path  = os.path.abspath(repo_path)
+    all_repos = RepoDB.list_all(db_path=db_path)
+    for r in all_repos:
+        if os.path.abspath(r.get('path', '')) == abs_path:
+            return r['id']
+
+    return None
 
 
-def _print_summary(
-    repo_id: int,
-    step_results: dict[int, dict],
-    total_elapsed: float,
-) -> None:
-    """打印 Step 8 汇总报告。"""
-    mins, secs = divmod(int(total_elapsed), 60)
+def _get_func_ids_for_analysis(
+    repo_id:   int,
+    db_path:   str,
+    languages: Optional[list[str]],
+    logger:    logging.Logger,
+) -> list[int]:
+    """
+    获取待分析的函数 ID 列表（按语言过滤 + 按调用丰富度排序）。
+
+    排序策略：有 callee 的函数（调用链更丰富）优先，其余追加其后。
+    此排序使信息量更大的函数先被 LLM 分析，产出质量更高的描述。
+    """
+    all_files     = FileDB.list_by_repo(repo_id, db_path=db_path)
+    lang_set      = set(languages) if languages else None
+
+    target_fids   = {
+        f['id'] for f in all_files
+        if lang_set is None or f.get('language') in lang_set
+    }
+
+    all_funcs     = FuncDB.list_by_repo(repo_id, db_path=db_path)
+    target_funcs  = [f for f in all_funcs if f.get('file_id') in target_fids]
+
+    with_callee   = [
+        f for f in target_funcs
+        if isinstance(f.get('callgraph'), dict)
+        and f['callgraph'].get('callees')
+    ]
+    wc_ids = {f['id'] for f in with_callee}
+    without_callee = [f for f in target_funcs if f['id'] not in wc_ids]
+
+    ids = [f['id'] for f in with_callee + without_callee]
+    logger.info(
+        f'  [func_ids] 待分析函数：{len(ids)} 个'
+        f'（有 callee={len(with_callee)}，无 callee={len(without_callee)}）'
+        f'  语言过滤：{lang_set or "无"}'
+    )
+    return ids
+
+
+def _run_steps_9_11_parallel(
+    repo_id:        int,
+    db_path:        str,
+    func_ids:       list[int],
+    skip_if_exists: bool,
+    max_workers:    int,
+    logger:         logging.Logger,
+) -> tuple[dict, dict, dict]:
+    """
+    Steps 9-11 三路并行：precondition / postcondition / exception。
+
+    并行安全性说明
+    ──────────────
+    三个分析分别写入 func.precondition / func.postcondition /
+    func.exception 三个独立字段，无行级写-写冲突。WAL 模式确保
+    SQLite 内部串行化多线程写，无需额外加锁。
+    理论加速比 ≈ ×3（取决于 LLM API 端并发限制）。
+
+    断点续建
+    ────────
+    skip_if_exists=True 时，每个分析函数内部自动跳过已有数据的函数，
+    中断后重新执行不会重复调用 LLM。
+    """
+    task_defs = [
+        ('precondition',  analyze_func_precondition),
+        ('postcondition', analyze_func_postcondition),
+        ('exception',     analyze_func_exception),
+    ]
+    results: dict[str, dict] = {}
+    t0 = time.time()
+
+    actual_workers = min(max_workers, 3)
+    logger.info(
+        f'  Step 9-11 三路并行启动'
+        f'（workers={actual_workers}，函数={len(func_ids)} 个）'
+    )
+
+    with ThreadPoolExecutor(
+        max_workers    = actual_workers,
+        thread_name_prefix = 'step9-11',
+    ) as pool:
+        future_to_name = {
+            pool.submit(
+                fn,
+                repo_id,
+                db_path        = db_path,
+                func_ids       = func_ids,
+                skip_if_exists = skip_if_exists,
+            ): name
+            for name, fn in task_defs
+        }
+
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                r        = future.result()
+                nonempty = sum(1 for v in r.values() if v)
+                results[name] = r
+                logger.info(
+                    f'  ✓ {name:<15s}  写库={len(r)}'
+                    f'  有数据={nonempty}/{len(r)}'
+                    f'  耗时={time.time() - t0:.0f}s'
+                )
+            except Exception as exc:
+                logger.error(f'  ✗ {name} 发生异常：{exc}', exc_info=True)
+                results[name] = {}
+
+    logger.info(f'  Steps 9-11 全部完成，总耗时 {time.time() - t0:.1f}s')
+    return (
+        results.get('precondition',  {}),
+        results.get('postcondition', {}),
+        results.get('exception',     {}),
+    )
+
+
+# ==================================================================
+# build_codemap —— 核心主流程（Step 19）
+# ==================================================================
+
+def build_codemap(
+    repo_path: str,
+    repo_name: Optional[str] = None,
+    db_path: Optional[str] = None,
+    force: bool = False,
+    start_step: int = 1,
+    languages: Optional[list[str]] = None,
+    skip_if_exists: bool = True,
+    max_step9_11_workers: int = 3,
+    max_step12_workers: int = 10,
+    no_desc: bool = False,
+    log_dir: Optional[str] = None,
+) -> dict:
+    """
+    CodeMAP 主构建流程（Step 19）：将 Step 1-18 完整串联，
+    从仓库路径生成完整的结构化代码知识库。
+
+    Parameters
+    ----------
+    repo_path : str
+        仓库本地路径（绝对或相对均可，内部统一转为绝对路径）。
+    repo_name : str | None
+        仓库名称；不传则取路径末尾目录名。
+    db_path : str | None
+        SQLite 数据库路径；不传则使用 config.DB_PATH。
+    force : bool
+        True  = 对结构性步骤（Step 1/3/4/6/7）强制清空旧数据后重建；
+                注意：数据库文件本身不会被删除，只删除该仓库的记录。
+        False = 增量模式，各步骤已有数据自动跳过。
+    start_step : int
+        从第几步开始执行（1-18），用于断点续建。
+        注意：start_step > 1 时数据库中必须已存在该仓库的记录。
+    languages : list[str] | None
+        Step 6/9-12 函数分析的语言白名单；None 表示处理全部语言。
+        示例：['C', 'C++'] 可显著减少 LLM 分析量。
+    skip_if_exists : bool
+        True  = 已有数据的函数/文件自动跳过（增量处理，推荐，默认）；
+        False = 强制重新分析所有实体（覆盖写入，用于数据质量更新）。
+    max_step9_11_workers : int
+        Steps 9-11 的并行线程数（最大 3），默认 3。
+        遇 API 限速错误时可降为 2 或 1。
+    max_step12_workers : int
+        Step 12 函数描述生成的并发数，默认 10。
+    no_desc : bool
+        True = 跳过 Step 12-18 的所有 LLM 描述生成步骤，
+               仅完成结构化分析（Steps 1-11）。
+    log_dir : str | None
+        日志输出目录；不传则使用 <project_root>/logs/。
+
+    Returns
+    -------
+    dict
+        构建结果摘要，字段包括：
+        {
+            'repo_id':       int,
+            'repo_name':     str,
+            'db_path':       str,
+            'log_file':      str,
+            'total_elapsed': float,    # 总耗时（秒）
+            'step1':  {...},           # 各步骤简要统计
+            'step2':  {...},
+            ...
+            'step18': {...},
+        }
+
+    Raises
+    ------
+    FileNotFoundError
+        repo_path 不存在或不是目录。
+    ValueError
+        · start_step 超出范围 [1, 18]
+        · start_step > 1 但数据库中找不到对应仓库记录
+    """
+    # ── 参数校验与路径规范化 ──────────────────────────────────────────────────
+    abs_repo_path = os.path.abspath(repo_path)
+    if not os.path.isdir(abs_repo_path):
+        raise FileNotFoundError(
+            f'[build_codemap] 仓库路径不存在或不是目录：{abs_repo_path}'
+        )
+    if not (1 <= start_step <= 18):
+        raise ValueError(
+            f'[build_codemap] start_step={start_step} 超出有效范围 [1, 18]。'
+        )
+
+    _db    = db_path or DB_PATH
+    _name  = repo_name or os.path.basename(abs_repo_path.rstrip(os.sep))
+    summary: dict = {}
+
+    # ── 日志初始化 ───────────────────────────────────────────────────────────
+    _log, log_file = _make_logger(log_dir)
+
+    _log.info('=' * 70)
+    _log.info('CodeMAP 构建开始')
+    _log.info(f'  仓库路径            : {abs_repo_path}')
+    _log.info(f'  仓库名称            : {_name}')
+    _log.info(f'  数据库              : {_db}')
+    _log.info(f'  日志文件            : {log_file}')
+    _log.info(f'  force               : {force}')
+    _log.info(f'  start_step          : {start_step}')
+    _log.info(f'  languages           : {languages or "（全部语言）"}')
+    _log.info(f'  skip_if_exists      : {skip_if_exists}')
+    _log.info(f'  no_desc             : {no_desc}')
+    _log.info(f'  max_step9-11_workers: {max_step9_11_workers}')
+    _log.info(f'  max_step12_workers  : {max_step12_workers}')
+    _log.info('=' * 70)
+
+    total_t0 = time.time()
+
+    # ── 数据库初始化 ──────────────────────────────────────────────────────────
+    os.makedirs(os.path.dirname(os.path.abspath(_db)), exist_ok=True)
+    init_db(_db)
+    _enable_wal(_db, _log)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step 1 : init_repo
+    # ─────────────────────────────────────────────────────────────────────────
+    repo_id: Optional[int] = None
+
+    if start_step <= 1:
+        with _Timer('Step 1   init_repo', _log):
+            repo_id = init_repo(
+                repo_path = abs_repo_path,
+                repo_name = _name,
+                db_path   = _db,
+                force     = force,
+            )
+        _log.info(f'  repo_id = {repo_id}')
+        summary['step1'] = {'repo_id': repo_id}
+
+    else:
+        # 断点续建：从数据库中找已有记录
+        repo_id = _find_repo_id(_name, abs_repo_path, _db)
+        if repo_id is None:
+            raise ValueError(
+                f'[build_codemap] 指定 start_step={start_step}（跳过 Step 1）'
+                f"，但数据库中找不到仓库 '{_name}'。\n"
+                "请先完整执行 Step 1（去掉 --step 参数或指定 --step 1）。"
+            )
+        _log.info(
+            f'Step 1 跳过（start_step={start_step}），'
+            f"已有 repo_id={repo_id}（'{_name}'）"
+        )
+        summary['step1'] = {'repo_id': repo_id, 'skipped': True}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step 2 : analyze_repo_language
+    # ─────────────────────────────────────────────────────────────────────────
+    if start_step <= 2:
+        with _Timer('Step 2   analyze_repo_language', _log):
+            lang_r = analyze_repo_language(repo_id, db_path=_db)
+        main_lang = lang_r.get('main', 'Unknown')
+        _log.info(f'  主语言 : {main_lang}')
+        summary['step2'] = {'main_language': main_lang}
+    else:
+        _log.info(f'Step 2 跳过（start_step={start_step}）')
+        summary['step2'] = {'skipped': True}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step 3 : analyze_repo_area  [LLM]
+    # ─────────────────────────────────────────────────────────────────────────
+    if start_step <= 3:
+        with _Timer('Step 3   analyze_repo_area  [LLM]', _log):
+            area_r = analyze_repo_area(
+                repo_id,
+                db_path = _db,
+                force   = force,
+            )
+        _log.info(f'  area 数 : {len(area_r)}')
+        summary['step3'] = {'area_count': len(area_r)}
+    else:
+        _log.info(f'Step 3 跳过（start_step={start_step}）')
+        summary['step3'] = {'skipped': True}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step 4 : analyze_area_file
+    # ─────────────────────────────────────────────────────────────────────────
+    if start_step <= 4:
+        with _Timer('Step 4   analyze_area_file', _log):
+            file_r = analyze_area_file(
+                repo_id,
+                db_path = _db,
+                force   = force,
+            )
+        total_files = sum(len(v) for v in file_r.values())
+        _log.info(f'  文件总数 : {total_files}')
+        summary['step4'] = {'file_count': total_files}
+    else:
+        _log.info(f'Step 4 跳过（start_step={start_step}）')
+        summary['step4'] = {'skipped': True}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step 5 : analyze_file_language
+    # ─────────────────────────────────────────────────────────────────────────
+    if start_step <= 5:
+        with _Timer('Step 5   analyze_file_language', _log):
+            lang_map = analyze_file_language(repo_id, db_path=_db)
+        _log.info(f'  检测文件数 : {len(lang_map)}')
+        summary['step5'] = {'detected_files': len(lang_map)}
+    else:
+        _log.info(f'Step 5 跳过（start_step={start_step}）')
+        summary['step5'] = {'skipped': True}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step 6 : analyze_file_func
+    # ─────────────────────────────────────────────────────────────────────────
+    if start_step <= 6:
+        with _Timer('Step 6   analyze_file_func', _log):
+            func_r = analyze_file_func(
+                repo_id,
+                db_path   = _db,
+                force     = force,
+                languages = languages,
+            )
+        total_funcs = sum(len(v) for v in func_r.values())
+        _log.info(f'  函数总数 : {total_funcs}')
+        summary['step6'] = {'func_count': total_funcs}
+    else:
+        _log.info(f'Step 6 跳过（start_step={start_step}）')
+        summary['step6'] = {'skipped': True}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step 7 : build_callgraph
+    # ─────────────────────────────────────────────────────────────────────────
+    if start_step <= 7:
+        with _Timer('Step 7   build_callgraph', _log):
+            cg_path = build_callgraph(
+                repo_id,
+                db_path = _db,
+                force   = force,
+            )
+        _log.info(f'  调用图文件 : {cg_path}')
+        summary['step7'] = {'callgraph_path': cg_path}
+    else:
+        # 自动定位已有调用图（analyze_func_callgraph 支持 callgraph_path=None 自动查找）
+        repo_rec = RepoDB.get_by_id(repo_id, db_path=_db)
+        cg_path  = os.path.join(
+            DATA_DIR, 'callgraph',
+            f"{repo_rec['name']}_callgraph.json" if repo_rec else '',
+        )
+        _log.info(
+            f'Step 7 跳过（start_step={start_step}），'
+            f'缓存文件：{cg_path}'
+        )
+        summary['step7'] = {'skipped': True, 'callgraph_path': cg_path}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step 8 : analyze_func_callgraph
+    # ─────────────────────────────────────────────────────────────────────────
+    if start_step <= 8:
+        with _Timer('Step 8   analyze_func_callgraph', _log):
+            cg_r = analyze_func_callgraph(
+                repo_id,
+                db_path        = _db,
+                # cg_path 存在时传入精确路径；否则传 None 让函数自动定位
+                callgraph_path = cg_path if os.path.isfile(cg_path) else None,
+            )
+        _log.info(f'  callgraph 写库 : {len(cg_r)} 个函数')
+        summary['step8'] = {'func_count': len(cg_r)}
+    else:
+        _log.info(f'Step 8 跳过（start_step={start_step}）')
+        summary['step8'] = {'skipped': True}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Steps 9-11 : precondition / postcondition / exception  [SA+LLM，三路并行]
+    # ─────────────────────────────────────────────────────────────────────────
+    if start_step <= 11:
+        func_ids = _get_func_ids_for_analysis(repo_id, _db, languages, _log)
+
+        with _Timer(
+            f'Steps 9-11  precondition / postcondition / exception'
+            f'  [SA+LLM × {min(max_step9_11_workers, 3)} 并行]',
+            _log,
+        ):
+            pre, post, exc = _run_steps_9_11_parallel(
+                repo_id        = repo_id,
+                db_path        = _db,
+                func_ids       = func_ids,
+                skip_if_exists = skip_if_exists,
+                max_workers    = max_step9_11_workers,
+                logger         = _log,
+            )
+
+        def _ne(d: dict) -> int:
+            return sum(1 for v in d.values() if v)
+
+        summary['step9']  = {'total': len(pre),  'nonempty': _ne(pre)}
+        summary['step10'] = {'total': len(post), 'nonempty': _ne(post)}
+        summary['step11'] = {'total': len(exc),  'nonempty': _ne(exc)}
+        _log.info(
+            f'  precondition  : {_ne(pre)}/{len(pre)} 个函数有数据\n'
+            f'  postcondition : {_ne(post)}/{len(post)} 个函数有数据\n'
+            f'  exception     : {_ne(exc)}/{len(exc)} 个函数有数据'
+        )
+    else:
+        _log.info(f'Steps 9-11 跳过（start_step={start_step}）')
+        summary['step9'] = summary['step10'] = summary['step11'] = {
+            'skipped': True
+        }
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Steps 12-18 : 描述生成阶段（可用 --no-desc 整体跳过）
+    # ─────────────────────────────────────────────────────────────────────────
+    if no_desc:
+        _log.info('')
+        _log.info('--no-desc 标志已设置，跳过 Step 12-18 的所有描述生成步骤。')
+        for s in range(12, 19):
+            summary[f'step{s}'] = {'skipped': True, 'reason': 'no_desc'}
+
+    else:
+        # ── Step 12 : analyze_func_description  [Agent，多函数并行] ──────────
+        if start_step <= 12:
+            with _Timer(
+                f'Step 12  analyze_func_description'
+                f'  [Agent × {max_step12_workers} 并行]',
+                _log,
+            ):
+                desc_r = analyze_func_description(
+                    repo_id        = repo_id,
+                    db_path        = _db,
+                    skip_if_exists = skip_if_exists,
+                    languages      = languages,
+                    max_workers    = max_step12_workers,
+                )
+            ne = sum(1 for v in desc_r.values() if v)
+            _log.info(f'  函数描述生成 : {ne}/{len(desc_r)}')
+            summary['step12'] = {'total': len(desc_r), 'nonempty': ne}
+        else:
+            _log.info(f'Step 12 跳过（start_step={start_step}）')
+            summary['step12'] = {'skipped': True}
+
+        # ── Step 13 : analyze_file_funclist_brief  [LLM batch] ───────────────
+        if start_step <= 13:
+            with _Timer('Step 13  analyze_file_funclist_brief', _log):
+                fl_brief = analyze_file_funclist_brief(
+                    repo_id        = repo_id,
+                    db_path        = _db,
+                    skip_if_exists = skip_if_exists,
+                )
+            _log.info(f'  处理文件数 : {len(fl_brief)}')
+            summary['step13'] = {'file_count': len(fl_brief)}
+        else:
+            _log.info(f'Step 13 跳过（start_step={start_step}）')
+            summary['step13'] = {'skipped': True}
+
+        # ── Step 14 : analyze_file_description  [LLM] ────────────────────────
+        if start_step <= 14:
+            with _Timer('Step 14  analyze_file_description', _log):
+                file_desc = analyze_file_description(
+                    repo_id        = repo_id,
+                    db_path        = _db,
+                    skip_if_exists = skip_if_exists,
+                )
+            ne = sum(1 for v in file_desc.values() if v)
+            _log.info(f'  文件描述生成 : {ne}/{len(file_desc)}')
+            summary['step14'] = {'total': len(file_desc), 'nonempty': ne}
+        else:
+            _log.info(f'Step 14 跳过（start_step={start_step}）')
+            summary['step14'] = {'skipped': True}
+
+        # ── Step 15 : analyze_area_filelist_brief  [LLM batch] ───────────────
+        if start_step <= 15:
+            with _Timer('Step 15  analyze_area_filelist_brief', _log):
+                al_brief = analyze_area_filelist_brief(
+                    repo_id        = repo_id,
+                    db_path        = _db,
+                    skip_if_exists = skip_if_exists,
+                )
+            _log.info(f'  处理 area 数 : {len(al_brief)}')
+            summary['step15'] = {'area_count': len(al_brief)}
+        else:
+            _log.info(f'Step 15 跳过（start_step={start_step}）')
+            summary['step15'] = {'skipped': True}
+
+        # ── Step 16 : analyze_area_description  [LLM] ────────────────────────
+        if start_step <= 16:
+            with _Timer('Step 16  analyze_area_description', _log):
+                area_desc = analyze_area_description(
+                    repo_id        = repo_id,
+                    db_path        = _db,
+                    skip_if_exists = skip_if_exists,
+                )
+            ne = sum(1 for v in area_desc.values() if v)
+            _log.info(f'  area 描述生成 : {ne}/{len(area_desc)}')
+            summary['step16'] = {'total': len(area_desc), 'nonempty': ne}
+        else:
+            _log.info(f'Step 16 跳过（start_step={start_step}）')
+            summary['step16'] = {'skipped': True}
+
+        # ── Step 17 : analyze_repo_arealist_brief  [LLM batch] ───────────────
+        if start_step <= 17:
+            with _Timer('Step 17  analyze_repo_arealist_brief', _log):
+                arealist = analyze_repo_arealist_brief(
+                    repo_id        = repo_id,
+                    db_path        = _db,
+                    skip_if_exists = skip_if_exists,
+                )
+            _log.info(f'  arealist 条目 : {len(arealist)} 个')
+            summary['step17'] = {'area_count': len(arealist)}
+        else:
+            _log.info(f'Step 17 跳过（start_step={start_step}）')
+            summary['step17'] = {'skipped': True}
+
+        # ── Step 18 : analyze_repo_description  [LLM] ────────────────────────
+        if start_step <= 18:
+            with _Timer('Step 18  analyze_repo_description', _log):
+                repo_desc = analyze_repo_description(
+                    repo_id        = repo_id,
+                    db_path        = _db,
+                    skip_if_exists = skip_if_exists,
+                )
+            _log.info(f'  仓库描述 : {len(repo_desc)} 字符')
+            summary['step18'] = {'desc_chars': len(repo_desc)}
+        else:
+            _log.info(f'Step 18 跳过（start_step={start_step}）')
+            summary['step18'] = {'skipped': True}
+
+    # ── 汇总报告 ─────────────────────────────────────────────────────────────
+    total_elapsed = time.time() - total_t0
+    mins, secs    = divmod(int(total_elapsed), 60)
+
+    _STEP_LABELS = {
+        1:  'init_repo',
+        2:  'analyze_repo_language',
+        3:  'analyze_repo_area',
+        4:  'analyze_area_file',
+        5:  'analyze_file_language',
+        6:  'analyze_file_func',
+        7:  'build_callgraph',
+        8:  'analyze_func_callgraph',
+        9:  'analyze_func_precondition',
+        10: 'analyze_func_postcondition',
+        11: 'analyze_func_exception',
+        12: 'analyze_func_description',
+        13: 'analyze_file_funclist_brief',
+        14: 'analyze_file_description',
+        15: 'analyze_area_filelist_brief',
+        16: 'analyze_area_description',
+        17: 'analyze_repo_arealist_brief',
+        18: 'analyze_repo_description',
+    }
+
     _log.info('')
     _log.info('=' * 70)
-    _log.info('Step 8 构建完成  汇总报告')
-    _log.info(f'  DB      : {_DB_PATH}')
+    _log.info('CodeMAP 构建完成  ✓')
+    _log.info(f'  仓库    : {_name}  (repo_id={repo_id})')
+    _log.info(f'  数据库  : {_db}')
+    _log.info(f'  日志    : {log_file}')
     _log.info(f'  总耗时  : {mins}m {secs}s  ({total_elapsed:.0f}s)')
-    _log.info('  ─── 各步骤结果 ───────────────────────────────────────────')
+    _log.info('  ─── 各步骤结果摘要 ─────────────────────────────────────')
 
-    labels = {
-        12: 'Step 12  func.description',
-        13: 'Step 13  file funclist brief',
-        14: 'Step 14  file.description',
-        15: 'Step 15  area filelist brief',
-        16: 'Step 16  area.description',
-        17: 'Step 17  repo arealist brief',
-        18: 'Step 18  repo.description',
-    }
-    for step, label in labels.items():
-        res = step_results.get(step)
-        if res is None:
-            _log.info(f'  {label:<40s} [跳过]')
-        elif isinstance(res, dict):
-            ne, tot = _count_nonempty(res)
-            pct = ne / tot * 100 if tot else 0
-            _log.info(f'  {label:<40s} {ne}/{tot} ({pct:.0f}%)')
-        elif isinstance(res, (list, str)):
-            n = len(res) if isinstance(res, list) else (1 if res else 0)
-            _log.info(f'  {label:<40s} ok ({n})')
+    for num, label in _STEP_LABELS.items():
+        info = summary.get(f'step{num}', {})
+        if info.get('skipped'):
+            reason = info.get('reason', '')
+            status = f'[跳过{" - " + reason if reason else ""}]'
+        else:
+            # 过滤掉路径等冗长字段，只展示数值统计
+            parts = [
+                f'{k}={v}'
+                for k, v in info.items()
+                if k not in ('skipped', 'reason', 'callgraph_path')
+                and v is not None
+            ]
+            status = '  '.join(parts) if parts else '✓'
+        _log.info(f'  Step {num:2d}  {label:<35s}  {status}')
 
-    # 额外：从 DB 直接统计 func.description 覆盖率
-    all_funcs    = FuncDB.list_by_repo(repo_id, db_path=_DB_PATH)
-    with_desc    = sum(1 for f in all_funcs if f.get('description'))
-    _log.info(
-        f'\n  func.description DB 实际覆盖：{with_desc}/{len(all_funcs)}'
-        f'  ({with_desc/len(all_funcs)*100:.1f}%)' if all_funcs else ''
-    )
     _log.info('=' * 70)
 
+    # 将元信息写回 summary 供调用方使用
+    summary.update({
+        'repo_id':       repo_id,
+        'repo_name':     _name,
+        'db_path':       _db,
+        'log_file':      log_file,
+        'total_elapsed': total_elapsed,
+    })
 
-# ── 主流程 ────────────────────────────────────────────────────────────────────
+    return summary
+
+
+# ==================================================================
+# 命令行入口
+# ==================================================================
 
 def main() -> None:
+    """命令行入口：解析参数后调用 build_codemap。"""
+
     parser = argparse.ArgumentParser(
-        description='minizip-ng Step 8 全量描述生成',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例：
-  python test/mainbuild_step12-18.py                 # 增量续建
-  python test/mainbuild_step12-18.py --force         # 覆盖重建所有描述
-  python test/mainbuild_step12-18.py --step 14       # 从 Step 14 开始
-  python test/mainbuild_step12-18.py --force --step 16  # 强制重建 Step 16+
+        prog            = 'codemap',
+        description     = 'CodeMAP —— 代码仓库结构化知识库构建工具（Step 1-18 全流程）',
+        formatter_class = argparse.RawDescriptionHelpFormatter,
+        epilog          = """
+使用示例：
+  # 首次全量分析（使用默认数据库）
+  python main.py /path/to/repo
+
+  # 强制重建：清空同名仓库旧数据后重新分析
+  python main.py /path/to/repo --force
+
+  # 断点续建：从 Step 12 继续（已完成 Step 1-11）
+  python main.py /path/to/repo --step 12
+
+  # 指定仓库名称和数据库路径
+  python main.py /path/to/repo --repo-name my_project --db-path ./my.db
+
+  # 只分析 C/C++ 函数，跳过其他语言（大幅缩短 LLM 分析时间）
+  python main.py /path/to/repo --languages C C++
+
+  # 只做结构化分析，跳过 Step 12-18 的描述生成
+  python main.py /path/to/repo --no-desc
+
+  # API 限速时降低并发度
+  python main.py /path/to/repo --workers-step9-11 1 --workers-step12 3
+
+  # 强制重新分析所有实体（覆盖已有数据）
+  python main.py /path/to/repo --step 9 --no-skip --languages C
         """.strip(),
     )
+
     parser.add_argument(
-        '--force', action='store_true',
-        help='覆盖已有描述重新生成（默认：增量，已有数据跳过）',
+        'repo_path',
+        help = '要分析的代码仓库本地路径（绝对或相对路径均可）',
     )
     parser.add_argument(
-        '--step', type=int, default=12, choices=range(12, 19),
-        metavar='N',
-        help='从第 N 步开始执行（12-18，默认12）',
+        '--repo-name', '-n',
+        dest    = 'repo_name',
+        default = None,
+        metavar = 'NAME',
+        help    = '仓库名称（默认：取路径末尾目录名）',
     )
+    parser.add_argument(
+        '--db-path', '-d',
+        dest    = 'db_path',
+        default = None,
+        metavar = 'PATH',
+        help    = f'SQLite 数据库路径（默认：{DB_PATH}）',
+    )
+    parser.add_argument(
+        '--force', '-f',
+        action  = 'store_true',
+        default = False,
+        help    = (
+            '强制重建：删除同名仓库旧数据后重新分析'
+            '（数据库文件本身保留，只清除该仓库的记录）'
+        ),
+    )
+    parser.add_argument(
+        '--step', '-s',
+        type    = int,
+        default = 1,
+        choices = range(1, 19),
+        metavar = 'N',
+        help    = '从第 N 步开始执行（1-18，默认 1），用于断点续建',
+    )
+    parser.add_argument(
+        '--languages', '-l',
+        nargs   = '+',
+        default = None,
+        metavar = 'LANG',
+        help    = (
+            'Step 6/9-12 函数分析的语言白名单（如 C C++）；'
+            '不传则处理全部语言'
+        ),
+    )
+    parser.add_argument(
+        '--no-desc',
+        action  = 'store_true',
+        default = False,
+        help    = '跳过 Step 12-18 的所有描述生成步骤，只完成结构化分析（Step 1-11）',
+    )
+    parser.add_argument(
+        '--no-skip',
+        action  = 'store_true',
+        default = False,
+        help    = '禁用增量跳过：对所有实体重新分析（即使 DB 中已有数据）',
+    )
+    parser.add_argument(
+        '--workers-step9-11',
+        type    = int,
+        default = 3,
+        metavar = 'N',
+        help    = (
+            'Steps 9-11 并行度（最大 3，默认 3）；'
+            'API 限速时可降为 2 或 1'
+        ),
+    )
+    parser.add_argument(
+        '--workers-step12',
+        type    = int,
+        default = 10,
+        metavar = 'N',
+        help    = 'Step 12 并发函数描述生成数（默认 10）',
+    )
+    parser.add_argument(
+        '--log-dir',
+        dest    = 'log_dir',
+        default = None,
+        metavar = 'DIR',
+        help    = f'日志输出目录（默认：<project_root>/logs/）',
+    )
+
     args = parser.parse_args()
 
-    skip = not args.force
-    start_step = args.step
-
-    # ── 前置检查 ──────────────────────────────────────────────────────────────
-    if not os.path.isfile(_DB_PATH):
-        _log.error(
-            f'数据库文件不存在：{_DB_PATH}\n'
-            '请先运行 python test/mainbuild_step0-7.py 完成 Step 0-7 构建。'
+    try:
+        build_codemap(
+            repo_path            = args.repo_path,
+            repo_name            = args.repo_name,
+            db_path              = args.db_path,
+            force                = args.force,
+            start_step           = args.step,
+            languages            = args.languages,
+            skip_if_exists       = not args.no_skip,
+            max_step9_11_workers = args.workers_step9_11,
+            max_step12_workers   = args.workers_step12,
+            no_desc              = args.no_desc,
+            log_dir              = args.log_dir,
         )
+        sys.exit(0)
+
+    except FileNotFoundError as e:
+        print(f'[错误] {e}', file=sys.stderr)
         sys.exit(1)
 
-    # 取 repo_id
-    repo = RepoDB.get_by_name('minizip-ng', db_path=_DB_PATH)
-    if repo is None:
-        _log.error(
-            "数据库中未找到 'minizip-ng' 仓库记录。"
-            "请确认 Step 0-7 已成功完成。"
+    except ValueError as e:
+        print(f'[错误] {e}', file=sys.stderr)
+        sys.exit(2)
+
+    except KeyboardInterrupt:
+        print(
+            '\n[中断] 用户中断构建。'
+            '已完成的数据已持久化到数据库，'
+            '下次可使用 --step N 从断点续建。',
+            file=sys.stderr,
         )
-        sys.exit(1)
+        sys.exit(130)
 
-    repo_id = repo['id']
-    _log.info(f'repo_id = {repo_id}  (minizip-ng)')
-    _log.info(f'skip_if_exists = {skip}  start_step = {start_step}')
-
-    total_t0      = time.time()
-    step_results: dict[int, object] = {}
-
-    # ── Step 12: analyze_func_description ────────────────────────────────────
-    if start_step <= 12:
-        with _Timer(f'Step 12  analyze_func_description  [Agent × {FUNC_DESC_WORKERS} 并行]'):
-            res = analyze_func_description(
-                repo_id        = repo_id,
-                db_path        = _DB_PATH,
-                skip_if_exists = skip,
-                languages      = ['C', 'C++'],
-                max_workers    = FUNC_DESC_WORKERS,
-            )
-        ne, tot = _count_nonempty(res)
-        _log.info(f'  描述生成：{ne}/{tot} 个函数')
-        step_results[12] = res
-    else:
-        _log.info(f'Step 12 跳过（--step={start_step}）')
-        step_results[12] = None
-
-    # ── Step 13: analyze_file_funclist_brief ──────────────────────────────────
-    if start_step <= 13:
-        with _Timer('Step 13  analyze_file_funclist_brief'):
-            res = analyze_file_funclist_brief(
-                repo_id        = repo_id,
-                db_path        = _DB_PATH,
-                skip_if_exists = skip,
-            )
-        _log.info(f'  处理文件：{len(res)} 个')
-        step_results[13] = res
-    else:
-        _log.info(f'Step 13 跳过（--step={start_step}）')
-        step_results[13] = None
-
-    # ── Step 14: analyze_file_description ────────────────────────────────────
-    if start_step <= 14:
-        with _Timer('Step 14  analyze_file_description'):
-            res = analyze_file_description(
-                repo_id        = repo_id,
-                db_path        = _DB_PATH,
-                skip_if_exists = skip,
-            )
-        ne, tot = _count_nonempty(res)
-        _log.info(f'  描述生成：{ne}/{tot} 个文件')
-        step_results[14] = res
-    else:
-        _log.info(f'Step 14 跳过（--step={start_step}）')
-        step_results[14] = None
-
-    # ── Step 15: analyze_area_filelist_brief ──────────────────────────────────
-    if start_step <= 15:
-        with _Timer('Step 15  analyze_area_filelist_brief'):
-            res = analyze_area_filelist_brief(
-                repo_id        = repo_id,
-                db_path        = _DB_PATH,
-                skip_if_exists = skip,
-            )
-        _log.info(f'  处理 area：{len(res)} 个')
-        step_results[15] = res
-    else:
-        _log.info(f'Step 15 跳过（--step={start_step}）')
-        step_results[15] = None
-
-    # ── Step 16: analyze_area_description ────────────────────────────────────
-    if start_step <= 16:
-        with _Timer('Step 16  analyze_area_description'):
-            res = analyze_area_description(
-                repo_id        = repo_id,
-                db_path        = _DB_PATH,
-                skip_if_exists = skip,
-            )
-        ne, tot = _count_nonempty(res)
-        _log.info(f'  描述生成：{ne}/{tot} 个 area')
-        step_results[16] = res
-    else:
-        _log.info(f'Step 16 跳过（--step={start_step}）')
-        step_results[16] = None
-
-    # ── Step 17: analyze_repo_arealist_brief ──────────────────────────────────
-    if start_step <= 17:
-        with _Timer('Step 17  analyze_repo_arealist_brief'):
-            res = analyze_repo_arealist_brief(
-                repo_id        = repo_id,
-                db_path        = _DB_PATH,
-                skip_if_exists = skip,
-            )
-        _log.info(f'  arealist brief 条目：{len(res)} 个')
-        step_results[17] = res
-    else:
-        _log.info(f'Step 17 跳过（--step={start_step}）')
-        step_results[17] = None
-
-    # ── Step 18: analyze_repo_description ────────────────────────────────────
-    if start_step <= 18:
-        with _Timer('Step 18  analyze_repo_description'):
-            desc = analyze_repo_description(
-                repo_id        = repo_id,
-                db_path        = _DB_PATH,
-                skip_if_exists = skip,
-            )
-        _log.info(f'  仓库描述：{len(desc)} 字符')
-        step_results[18] = desc
-    else:
-        _log.info(f'Step 18 跳过（--step={start_step}）')
-        step_results[18] = None
-
-    # ── 汇总 ─────────────────────────────────────────────────────────────────
-    _print_summary(repo_id, step_results, time.time() - total_t0)
+    except Exception as e:
+        print(f'[未知错误] {e}', file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(3)
 
 
 if __name__ == '__main__':

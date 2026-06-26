@@ -790,43 +790,44 @@ def _run_sa(
 
 
 # ==================================================================
-# §8  公共主分析骨架（内部复用）
+# §8  analyze_func_summary —— 单次 LLM 调用生成所有函数摘要字段
 # ==================================================================
 
-def _analyze_func_field(
-    kind: str,
+def analyze_func_summary(
     repo_id: int,
-    db_path: Optional[str],
-    func_ids: Optional[list[int]],
-    skip_if_exists: bool,
-    languages: Optional[list[str]],
-) -> dict[int, list[str]]:
+    db_path: Optional[str] = None,
+    func_ids: Optional[list[int]] = None,
+    skip_if_exists: bool = True,
+    languages: Optional[list[str]] = None,
+) -> dict[int, dict]:
     """
-    通用分析骨架，供三个公开函数复用。
+    SA + LLM 一次调用，同时生成函数的 precondition / postcondition /
+    exception / description，合并写入对应 func 表字段。
 
-    kind : 'precondition' | 'postcondition' | 'exception'
+    Parameters
+    ----------
+    repo_id         : 目标仓库 id
+    db_path         : SQLite 路径；不传则用 config.DB_PATH
+    func_ids        : 指定函数 id 列表；None 则处理全部函数
+    skip_if_exists  : True = 跳过四个字段均已存在的函数（增量处理）
+    languages       : 语言白名单；None 则不过滤
+
+    Returns
+    -------
+    dict[int, dict]
+        {func_id → {"precondition": [...], "postcondition": [...],
+                     "exception": [...], "description": "..."}}
+
+    Raises
+    ------
+    ValueError  repo_id 不存在
     """
     from llm.client  import chat_completion_json
+    from llm.prompts import ANALYZE_FUNC_SUMMARY_SYSTEM, ANALYZE_FUNC_SUMMARY_USER
     import config as _cfg
 
-    if kind == 'precondition':
-        from llm.prompts import (
-            ANALYZE_FUNC_PRECONDITION_SYSTEM as SYS,
-            ANALYZE_FUNC_PRECONDITION_USER   as USR,
-        )
-    elif kind == 'postcondition':
-        from llm.prompts import (
-            ANALYZE_FUNC_POSTCONDITION_SYSTEM as SYS,
-            ANALYZE_FUNC_POSTCONDITION_USER   as USR,
-        )
-    else:
-        from llm.prompts import (
-            ANALYZE_FUNC_EXCEPTION_SYSTEM as SYS,
-            ANALYZE_FUNC_EXCEPTION_USER   as USR,
-        )
-
-    _db = db_path or DB_PATH
-    label = f'[analyze_func_{kind}]'
+    _db   = db_path or DB_PATH
+    label = '[analyze_func_summary]'
 
     # ── 取仓库信息 ──────────────────────────────────────────────
     repo = RepoDB.get_by_id(repo_id, db_path=_db)
@@ -857,19 +858,27 @@ def _analyze_func_field(
         ]
 
     if skip_if_exists:
-        before = len(all_funcs)
-        all_funcs = [f for f in all_funcs if not f.get(kind)]
-        skipped_existing = before - len(all_funcs)
-        if skipped_existing:
-            print(f'{label} 跳过已有数据的函数：{skipped_existing} 个')
+        before    = len(all_funcs)
+        all_funcs = [
+            f for f in all_funcs
+            if not (
+                f.get('precondition') and
+                f.get('postcondition') and
+                f.get('exception') and
+                f.get('description')
+            )
+        ]
+        skipped_cnt = before - len(all_funcs)
+        if skipped_cnt:
+            print(f'{label} 跳过已有完整摘要的函数：{skipped_cnt} 个')
 
     total   = len(all_funcs)
     print(
-        f'{label} 待处理函数：{total} 个 '
-        f'（模型：{_cfg.LLM_MODEL}，tree-sitter={'可用' if _TREE_SITTER_OK else '不可用'}）'
+        f'{label} 待处理函数：{total} 个'
+        f'（模型：{_cfg.LLM_MODEL}，tree-sitter={"可用" if _TREE_SITTER_OK else "不可用"}）'
     )
 
-    result:  dict[int, list[str]] = {}
+    result:  dict[int, dict] = {}
     success = error = skipped = 0
 
     for idx, fn_rec in enumerate(all_funcs, start=1):
@@ -877,7 +886,6 @@ def _analyze_func_field(
         func_name = fn_rec['name']
         file_id   = fn_rec.get('file_id')
 
-        # 获取语言信息
         file_rec  = file_map.get(file_id) if file_id else None
         language  = (file_rec or {}).get('language', 'Unknown')
 
@@ -895,7 +903,7 @@ def _analyze_func_field(
 
         if not rel_path or start_line <= 0:
             skipped += 1
-            result[func_id] = []
+            result[func_id] = {}
             continue
 
         # 读取函数源码
@@ -903,15 +911,21 @@ def _analyze_func_field(
         if source is None:
             print(f'{label}   ⚠ 无法读取源码：{rel_path}:{start_line}，跳过')
             skipped += 1
-            result[func_id] = []
+            result[func_id] = {}
             continue
 
-        # 运行 SA
+        # 运行三个维度的 SA，合并提供给 LLM
         try:
-            sa_results = _run_sa(kind, source, func_name, language)
+            sa_pre  = _run_sa('precondition',  source, func_name, language)
+            sa_post = _run_sa('postcondition', source, func_name, language)
+            sa_exc  = _run_sa('exception',     source, func_name, language)
+            sa_combined: dict = {}
+            if sa_pre:  sa_combined['precondition_hints']  = sa_pre
+            if sa_post: sa_combined['postcondition_hints'] = sa_post
+            if sa_exc:  sa_combined['exception_hints']     = sa_exc
         except Exception as exc:
             print(f'{label}   ⚠ SA 失败（{func_name}）：{exc}，以空 SA 继续')
-            sa_results = {}
+            sa_combined = {}
 
         # 准备 prompt 参数
         io = fn_rec.get('io') or {}
@@ -927,60 +941,88 @@ def _analyze_func_field(
         if len(source) > _MAX_SOURCE_IN_PROMPT:
             source_trunc += f'\n... (源码截断，原长 {len(source)} 字符)'
 
-        user_content = USR.format(
+        user_content = ANALYZE_FUNC_SUMMARY_USER.format(
             func_name   = func_name,
             language    = language,
             signature   = str(fn_rec.get('signature', '') or '')[:300],
             params      = params_text,
             return_type = return_type,
-            sa_results  = _json.dumps(sa_results, ensure_ascii=False, indent=2),
+            sa_results  = _json.dumps(sa_combined, ensure_ascii=False, indent=2),
             source_code = source_trunc,
         )
 
         messages = [
-            {'role': 'system', 'content': SYS},
+            {'role': 'system', 'content': ANALYZE_FUNC_SUMMARY_SYSTEM},
             {'role': 'user',   'content': user_content},
         ]
 
         # ── LLM 调用（含重试）──────────────────────────────────
-        last_exc  = None
-        call_ok   = False
+        last_exc = None
+        call_ok  = False
 
         for attempt in range(1, _LLM_MAX_RETRIES + 1):
             try:
-                raw   = chat_completion_json(messages=messages, temperature=0.1)
-                items = _parse_llm_list(raw)
-                FuncDB.update(func_id, db_path=_db, **{kind: items})
-                result[func_id] = items
+                raw = chat_completion_json(messages=messages, temperature=0.1)
+
+                def _to_list(val) -> list[str]:
+                    if isinstance(val, list):
+                        return [str(x).strip() for x in val if x and str(x).strip()]
+                    return [str(val).strip()] if val and str(val).strip() else []
+
+                if isinstance(raw, dict):
+                    precondition  = _to_list(raw.get('precondition'))
+                    postcondition = _to_list(raw.get('postcondition'))
+                    exception     = _to_list(raw.get('exception'))
+                    description   = str(raw.get('description', '') or '').strip()
+                else:
+                    precondition = postcondition = exception = []
+                    description  = ''
+
+                FuncDB.update(
+                    func_id,
+                    db_path       = _db,
+                    precondition  = precondition,
+                    postcondition = postcondition,
+                    exception     = exception,
+                    description   = description,
+                )
+
+                result[func_id] = {
+                    'precondition':  precondition,
+                    'postcondition': postcondition,
+                    'exception':     exception,
+                    'description':   description,
+                }
                 success += 1
-                call_ok = True
-                break                          # 成功，跳出重试循环
+                call_ok  = True
+                break
 
             except Exception as exc:
                 last_exc = exc
                 if attempt < _LLM_MAX_RETRIES:
                     wait = _LLM_RETRY_DELAYS[attempt - 1]
                     print(
-                        f'{label}   ↻ LLM 调用失败，第 {attempt}/{_LLM_MAX_RETRIES} 次'
+                        f'{label}   ↻ LLM 失败 第{attempt}/{_LLM_MAX_RETRIES}次'
                         f'（func_id={func_id} {func_name}）：{exc}'
                         f'，{wait}s 后重试…'
                     )
                     time.sleep(wait)
                 else:
-                    # 最后一次仍失败
                     print(
-                        f'{label}   ✗ LLM 调用失败，已重试 {_LLM_MAX_RETRIES} 次放弃'
+                        f'{label}   ✗ LLM 已放弃'
                         f'（func_id={func_id} {func_name}）：{last_exc}'
                     )
 
         if not call_ok:
             error += 1
-            result[func_id] = []
+            result[func_id] = {}
             try:
-                FuncDB.update(func_id, db_path=_db, **{kind: []})
-            except Exception as write_exc:
-                print(f'{label}   ⚠ 写库空列表失败（func_id={func_id}）：{write_exc}')
-        # ── 重试块结束 ─────────────────────────────────────────
+                FuncDB.update(
+                    func_id, db_path=_db,
+                    precondition=[], postcondition=[], exception=[], description='',
+                )
+            except Exception as we:
+                print(f'{label}   ⚠ 写库失败（func_id={func_id}）：{we}')
 
         # 进度日志
         if idx % 10 == 0 or idx == total:
@@ -995,333 +1037,5 @@ def _analyze_func_field(
         f'  写库成功 : {success}\n'
         f'  LLM失败  : {error}\n'
         f'  跳过     : {skipped}'
-    )
-    return result
-
-
-# ==================================================================
-# §9  公开 API
-# ==================================================================
-
-def analyze_func_precondition(
-    repo_id: int,
-    db_path: Optional[str] = None,
-    func_ids: Optional[list[int]] = None,
-    skip_if_exists: bool = True,
-    languages: Optional[list[str]] = None,
-) -> dict[int, list[str]]:
-    """
-    SA + LLM 分析仓库内函数的前置条件，写入 func.precondition。
-
-    前置条件描述调用方在调用该函数前必须保证满足的条件：
-    参数非空约束、值范围、对象状态、资源有效性、调用顺序等。
-
-    Parameters
-    ----------
-    repo_id         : 目标仓库 id
-    db_path         : SQLite 路径；不传则用 config.DB_PATH
-    func_ids        : 指定函数 id 列表；None 则处理全部函数
-    skip_if_exists  : True = 跳过已有 precondition 数据的函数（增量处理）
-    languages       : 语言白名单；None 则不过滤（如 ['C', 'C++']）
-
-    Returns
-    -------
-    dict[int, list[str]]   {func_id → ["前置条件1", "前置条件2", ...]}
-
-    Raises
-    ------
-    ValueError  repo_id 不存在
-    """
-    return _analyze_func_field(
-        kind='precondition',
-        repo_id=repo_id,
-        db_path=db_path,
-        func_ids=func_ids,
-        skip_if_exists=skip_if_exists,
-        languages=languages,
-    )
-
-
-def analyze_func_postcondition(
-    repo_id: int,
-    db_path: Optional[str] = None,
-    func_ids: Optional[list[int]] = None,
-    skip_if_exists: bool = True,
-    languages: Optional[list[str]] = None,
-) -> dict[int, list[str]]:
-    """
-    SA + LLM 分析仓库内函数的后置条件，写入 func.postcondition。
-
-    后置条件描述函数执行完毕后调用方可以依赖的保证：
-    返回值语义、输出参数写回、内存分配责任、状态变更、副作用等。
-
-    Parameters / Returns / Raises 参见 analyze_func_precondition。
-    """
-    return _analyze_func_field(
-        kind='postcondition',
-        repo_id=repo_id,
-        db_path=db_path,
-        func_ids=func_ids,
-        skip_if_exists=skip_if_exists,
-        languages=languages,
-    )
-
-
-def analyze_func_exception(
-    repo_id: int,
-    db_path: Optional[str] = None,
-    func_ids: Optional[list[int]] = None,
-    skip_if_exists: bool = True,
-    languages: Optional[list[str]] = None,
-) -> dict[int, list[str]]:
-    """
-    SA + LLM 分析仓库内函数的异常与错误处理，写入 func.exception。
-
-    分析维度包括：已处理错误路径、错误传播方式、资源清理行为、
-    潜在未检查调用风险、errno 使用等。
-
-    Parameters / Returns / Raises 参见 analyze_func_precondition。
-    """
-    return _analyze_func_field(
-        kind='exception',
-        repo_id=repo_id,
-        db_path=db_path,
-        func_ids=func_ids,
-        skip_if_exists=skip_if_exists,
-        languages=languages,
-    )
-
-# ────────────────────────────────────────────────
-# 以下为 Step 12 新增，依赖已有的 _read_func_source / _format_params 等工具函数
-
-import time as _time
-from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-
-# LLM 重试配置（Step 12 统一用 5 次）
-_DESC_MAX_RETRIES  = 5
-_DESC_RETRY_DELAYS = (2, 5, 10, 20, 40)   # 第1-5次失败后等待秒数
-_DESC_MAX_SRC_CHARS = 4000                 # prompt 中源码最大字符数
-
-
-def _retry(fn, label: str = "", max_retries: int = _DESC_MAX_RETRIES):
-    """通用重试包装器，失败后按指数退避等待，最多 max_retries 次。"""
-    last_exc = None
-    for i in range(max_retries):
-        try:
-            return fn()
-        except Exception as exc:
-            last_exc = exc
-            if i < max_retries - 1:
-                wait = _DESC_RETRY_DELAYS[min(i, len(_DESC_RETRY_DELAYS) - 1)]
-                print(
-                    f"  ↻ 第{i+1}/{max_retries}次失败{' (' + label + ')' if label else ''}："
-                    f"{exc}，{wait}s 后重试…"
-                )
-                _time.sleep(wait)
-    raise RuntimeError(
-        f"已重试 {max_retries} 次仍失败{' (' + label + ')' if label else ''}。"
-        f"最后异常：{last_exc}"
-    )
-
-
-def _describe_one_func(
-    fn_rec:    dict,
-    file_map:  dict,
-    repo_id:   int,
-    db_path:   str,
-    repo_path: str,
-) -> tuple[int, str]:
-    """
-    处理单个函数的描述生成（含源码读取 + Agent 调用）。
-    返回 (func_id, description_text)。
-    供 ThreadPoolExecutor 调用。
-    """
-    from llm.agent import run_func_description_agent
-
-    func_id   = fn_rec["id"]
-    func_name = fn_rec["name"]
-
-    # 取文件语言
-    file_rec  = file_map.get(fn_rec.get("file_id"))
-    language  = (file_rec or {}).get("language", "C")
-
-    # 解析 place
-    place = fn_rec.get("place") or {}
-    if isinstance(place, str):
-        try:
-            import json as _j; place = _j.loads(place)
-        except Exception:
-            place = {}
-
-    rel_path   = place.get("file_path", "")
-    start_line = int(place.get("start_line", 0))
-    end_line   = int(place.get("end_line", 0))
-
-    if not rel_path or start_line <= 0:
-        return func_id, ""
-
-    # 读取源码
-    source = _read_func_source(repo_path, rel_path, start_line, end_line)
-    if source is None:
-        return func_id, ""
-
-    if len(source) > _DESC_MAX_SRC_CHARS:
-        source = source[:_DESC_MAX_SRC_CHARS] + f"\n...(源码截断，原长 {len(source)} 字符)"
-
-    # 将语言信息注入 func_rec（agent.py 需要）
-    fn_rec_copy = dict(fn_rec)
-    fn_rec_copy["_language"] = language
-
-    label = f"func_id={func_id} {func_name}"
-
-    def _run():
-        return run_func_description_agent(
-            func_rec   = fn_rec_copy,
-            repo_id    = repo_id,
-            db_path    = db_path,
-            repo_path  = repo_path,
-            source_code= source,
-        )
-
-    desc = _retry(_run, label=label, max_retries=_DESC_MAX_RETRIES)
-    return func_id, desc
-
-
-def analyze_func_description(
-    repo_id: int,
-    db_path: Optional[str] = None,
-    func_ids: Optional[list[int]] = None,
-    skip_if_exists: bool = True,
-    languages: Optional[list[str]] = None,
-    max_workers: int = 10,
-) -> dict[int, str]:
-    """
-    Agent 分析仓库内函数，生成自然语言描述，写入 func.description。
-
-    并行策略
-    --------
-    每个函数独立运行 Agent（LLM 网络 I/O 为主，GIL 在阻塞时释放），
-    ThreadPoolExecutor(max_workers) 实现真并发，默认 10 路。
-
-    重试策略
-    --------
-    每个函数最多重试 5 次（含首次），失败后写入空字符串并记录错误。
-
-    Parameters
-    ----------
-    repo_id         : 目标仓库 id
-    db_path         : SQLite 路径；None 使用 config.DB_PATH
-    func_ids        : 指定函数 id 列表；None 处理全部
-    skip_if_exists  : True = 跳过已有 description 的函数（增量处理）
-    languages       : 语言白名单；None 不过滤（如 ['C', 'C++']）
-    max_workers     : 并发线程数，默认 10
-
-    Returns
-    -------
-    dict[int, str]  {func_id → description_text}
-    """
-    import config as _cfg
-
-    _db = db_path or DB_PATH
-
-    repo = RepoDB.get_by_id(repo_id, db_path=_db)
-    if repo is None:
-        raise ValueError(f"[analyze_func_description] repo_id={repo_id} 不存在。")
-
-    repo_path = repo["path"]
-    repo_name = repo["name"]
-    print(f"[analyze_func_description] 目标仓库：{repo_name}（{repo_path}）")
-
-    # ── 构建文件语言映射 ──────────────────────────────────────────
-    all_files = FileDB.list_by_repo(repo_id, db_path=_db)
-    file_map  = {f["id"]: f for f in all_files}
-
-    # ── 过滤待处理函数 ────────────────────────────────────────────
-    all_funcs = FuncDB.list_by_repo(repo_id, db_path=_db)
-
-    if func_ids is not None:
-        id_set    = set(func_ids)
-        all_funcs = [f for f in all_funcs if f["id"] in id_set]
-
-    if languages:
-        lang_set  = set(languages)
-        all_funcs = [
-            f for f in all_funcs
-            if (file_map.get(f.get("file_id")) or {}).get("language", "Unknown")
-               in lang_set
-        ]
-
-    if skip_if_exists:
-        before    = len(all_funcs)
-        all_funcs = [f for f in all_funcs if not f.get("description")]
-        print(
-            f"[analyze_func_description] 跳过已有描述：{before - len(all_funcs)} 个"
-        )
-
-    total = len(all_funcs)
-    print(
-        f"[analyze_func_description] 待处理函数：{total} 个"
-        f"（并发度 {max_workers}，模型 {_cfg.LLM_MODEL}）"
-    )
-
-    if total == 0:
-        print("[analyze_func_description] 无需处理，退出。")
-        return {}
-
-    result:   dict[int, str] = {}
-    success   = error = 0
-    t0 = _time.time()
-
-    # ── 并行处理 ─────────────────────────────────────────────────
-    with ThreadPoolExecutor(
-        max_workers=max_workers, thread_name_prefix="func_desc"
-    ) as pool:
-        future_to_fid = {
-            pool.submit(
-                _describe_one_func,
-                fn_rec, file_map, repo_id, _db, repo_path,
-            ): fn_rec["id"]
-            for fn_rec in all_funcs
-        }
-
-        done_count = 0
-        for future in _as_completed(future_to_fid):
-            fid       = future_to_fid[future]
-            done_count += 1
-
-            try:
-                fid_out, desc = future.result()
-                result[fid_out] = desc
-                if desc:
-                    FuncDB.update(fid_out, db_path=_db, description=desc)
-                    success += 1
-                else:
-                    error += 1
-            except Exception as exc:
-                print(
-                    f"[analyze_func_description]   ✗ func_id={fid} 最终失败：{exc}"
-                )
-                result[fid] = ""
-                try:
-                    FuncDB.update(fid, db_path=_db, description="")
-                except Exception:
-                    pass
-                error += 1
-
-            # 进度日志
-            if done_count % 20 == 0 or done_count == total:
-                elapsed = _time.time() - t0
-                print(
-                    f"[analyze_func_description]   进度 {done_count}/{total}"
-                    f"  ✓={success}  ✗={error}"
-                    f"  耗时={elapsed:.0f}s"
-                )
-
-    print(
-        f"[analyze_func_description] ✓ 完成：\n"
-        f"  总处理  : {total}\n"
-        f"  写库成功 : {success}\n"
-        f"  失败    : {error}\n"
-        f"  总耗时  : {_time.time() - t0:.0f}s"
     )
     return result

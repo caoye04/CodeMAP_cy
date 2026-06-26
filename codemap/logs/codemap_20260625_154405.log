@@ -1,0 +1,41 @@
+15:44:05  INFO     ======================================================================
+15:44:05  INFO     CodeMAP 构建开始
+15:44:05  INFO       仓库路径            : C:\Users\caoye04\Desktop\repo_4_codemap\miniz
+15:44:05  INFO       仓库名称            : miniz
+15:44:05  INFO       数据库              : data/db_miniz_20260625
+15:44:05  INFO       日志文件            : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\logs\codemap_20260625_154405.log
+15:44:05  INFO       force               : False
+15:44:05  INFO       start_step          : 1
+15:44:05  INFO       languages           : （全部语言）
+15:44:05  INFO       skip_if_exists      : True
+15:44:05  INFO       no_desc             : False
+15:44:05  INFO       max_step9-11_workers: 3
+15:44:05  INFO       max_step12_workers  : 10
+15:44:05  INFO     ======================================================================
+15:44:05  DEBUG    [WAL] journal_mode = wal
+15:44:05  INFO     ▶ Step 1   init_repo
+15:44:05  INFO     ◀ ✓ Step 1   init_repo  耗时 0s
+15:44:05  INFO       repo_id = 1
+15:44:05  INFO     ▶ Step 2   analyze_repo_language
+15:44:05  INFO     ◀ ✓ Step 2   analyze_repo_language  耗时 0s
+15:44:05  INFO       主语言 : C++
+15:44:05  INFO     ▶ Step 3   analyze_repo_area  [LLM]
+15:44:22  INFO     ◀ ✓ Step 3   analyze_repo_area  [LLM]  耗时 16s
+15:44:22  INFO       area 数 : 3
+15:44:22  INFO     ▶ Step 4   analyze_area_file
+15:44:23  INFO     ◀ ✓ Step 4   analyze_area_file  耗时 0s
+15:44:23  INFO       文件总数 : 46
+15:44:23  INFO     ▶ Step 5   analyze_file_language
+15:44:23  INFO     ◀ ✓ Step 5   analyze_file_language  耗时 0s
+15:44:23  INFO       检测文件数 : 46
+15:44:23  INFO     ▶ Step 6   analyze_file_func
+15:44:34  INFO     ◀ ✓ Step 6   analyze_file_func  耗时 10s
+15:44:34  INFO       函数总数 : 1681
+15:44:34  INFO     ▶ Step 7   build_callgraph
+15:44:34  INFO     ◀ ✓ Step 7   build_callgraph  耗时 0s
+15:44:34  INFO       调用图文件 : C:\Users\caoye04\Desktop\CodeMAP_cy\codemap\data\callgraph\miniz_callgraph.json
+15:44:34  INFO     ▶ Step 8   analyze_func_callgraph
+15:44:43  INFO     ◀ ✓ Step 8   analyze_func_callgraph  耗时 8s
+15:44:43  INFO       callgraph 写库 : 1681 个函数
+15:44:43  INFO     ▶ Steps 9-12  analyze_func_summary  [SA+LLM]
+15:44:43  INFO     ◀ ✗ Steps 9-12  analyze_func_summary  [SA+LLM]  耗时 0s

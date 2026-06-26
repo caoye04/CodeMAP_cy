@@ -15,9 +15,3 @@ DB_PATH      = os.path.join(DATA_DIR, 'codemap.db')
 LLM_API_KEY  = os.getenv('LLM_API_KEY',  'sk-MJjAy6jCzTNL2paHSbrFE9LVArxlkoFzevM145VXOW83xSKv')
 LLM_BASE_URL = os.getenv('LLM_BASE_URL', 'https://api.ezai88.com')
 LLM_MODEL    = os.getenv('LLM_MODEL',    'gemini-2.5-flash')
-
-# ------------------------------------------------------------------
-#  CodeQL
-# ------------------------------------------------------------------
-# CODEQL_BIN   = os.getenv('CODEQL_BIN', r'C:\tools\codeql\codeql.exe')   # codeql 可执行文件路径
-# CODEQL_DB_DIR = os.path.join(DATA_DIR, 'codeql_dbs')

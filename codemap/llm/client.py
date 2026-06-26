@@ -1,6 +1,6 @@
 """
 llm/client.py
-LLM 调用统一封装，支持 OpenAI 兼容接口（含 ezai88.com 代理）。
+LLM 调用统一封装
 
 对外暴露：
   chat_completion()       → str

@@ -1,0 +1,72 @@
+{
+  "repo_id": 2,
+  "repo_name": "miniz",
+  "repo_path": "C:\\Users\\caoye04\\Desktop\\repo_4_codemap\\miniz",
+  "main_language": "C++",
+  "llm_raw": {
+    "areas": [
+      {
+        "name": "deflate_encoder",
+        "path": ".",
+        "rationale": "此区域包含Miniz库中Deflate压缩算法的核心编码逻辑（tdefl），是实现数据压缩的底层组件。",
+        "brief": "Miniz库的Deflate数据编码器。"
+      },
+      {
+        "name": "deflate_decoder",
+        "path": ".",
+        "rationale": "此区域包含Miniz库中Deflate解压缩算法的核心解码逻辑（tinfl），是实现数据解压缩的底层组件。",
+        "brief": "Miniz库的Deflate数据解码器。"
+      },
+      {
+        "name": "zip_archive_api",
+        "path": ".",
+        "rationale": "此区域提供一套完整的ZIP文件格式读写和操作API（miniz_zip），是Miniz库的独立可选功能模块，用于处理ZIP归档。",
+        "brief": "Miniz库的ZIP文件归档操作接口。"
+      },
+      {
+        "name": "library_core_and_public_api",
+        "path": ".",
+        "rationale": "此区域包含Miniz库的公共头文件、通用定义（miniz_common.h）以及整合Deflate和ZIP功能的统一API实现（miniz.c/h），是用户直接交互的主要接口。",
+        "brief": "Miniz库的核心公共API和通用工具。"
+      },
+      {
+        "name": "examples",
+        "path": "examples/",
+        "rationale": "此区域包含Miniz库各种功能的使用示例代码，帮助开发者理解和学习如何集成和使用库的特性。",
+        "brief": "Miniz库功能的使用示例代码。"
+      },
+      {
+        "name": "tests",
+        "path": "tests/",
+        "rationale": "此区域包含对Miniz库各个模块的单元测试、模糊测试和性能测试用例，确保代码质量和稳定性。",
+        "brief": "Miniz库的测试套件和测试用例。"
+      },
+      {
+        "name": "build_and_meta",
+        "path": ".",
+        "rationale": "此区域包含项目的构建系统配置（如CMake, Meson）、自动化脚本、许可证、变更日志和项目说明等非代码资产，支持项目的构建、分发和维护。",
+        "brief": "项目的构建配置、自动化脚本和元数据。"
+      }
+    ]
+  },
+  "areas": [
+    {
+      "name": "deflate_encoder",
+      "path": ".",
+      "rationale": "此区域包含Miniz库中Deflate压缩算法的核心编码逻辑（tdefl），是实现数据压缩的底层组件。",
+      "brief": "Miniz库的Deflate数据编码器。"
+    },
+    {
+      "name": "examples",
+      "path": "examples/",
+      "rationale": "此区域包含Miniz库各种功能的使用示例代码，帮助开发者理解和学习如何集成和使用库的特性。",
+      "brief": "Miniz库功能的使用示例代码。"
+    },
+    {
+      "name": "tests",
+      "path": "tests/",
+      "rationale": "此区域包含对Miniz库各个模块的单元测试、模糊测试和性能测试用例，确保代码质量和稳定性。",
+      "brief": "Miniz库的测试套件和测试用例。"
+    }
+  ]
+}
