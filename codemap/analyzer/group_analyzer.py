@@ -1,11 +1,11 @@
 """
-analyzer/area_analyzer.py
-CodeMAP Area 层分析器
+analyzer/group_analyzer.py
+CodeMAP Group 层分析器
 
 实现：
-  - analyze_area_file : 扫描每个 area 路径下的文件结构，
-                        写入 file 表并更新 area.filelist，
-                        中间产物保存至 data/analyze_area_file/<repo_name>.json
+  - analyze_group_file : 扫描每个 group 路径下的文件结构，
+                        写入 file 表并更新 group.filelist，
+                        中间产物保存至 data/analyze_group_file/<repo_name>.json
 """
 
 import json as _json
@@ -14,7 +14,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from db.dao import RepoDB, AreaDB, FileDB
+from db.dao import RepoDB, GroupDB, FileDB
 from config import DB_PATH, DATA_DIR
 
 
@@ -132,26 +132,26 @@ def _is_useful_file(filename: str) -> bool:
     return True
 
 
-def _scan_area_files(
-    area_abs_path: str,
+def _scan_group_files(
+    group_abs_path: str,
     repo_path: str,
-    other_area_abs_paths: set[str],
+    other_group_abs_paths: set[str],
 ) -> list[dict]:
     """
-    递归扫描 area 目录，返回所有有效文件的 name + path 列表。
+    递归扫描 group 目录，返回所有有效文件的 name + path 列表。
 
-    关键设计：**不递归进入属于其他 area 的子目录**，从根源上避免
-    同一文件被重复归属到多个 area（当 area 路径存在包含关系时尤其重要，
-    例如 area='.' 与 area='src/' 同时存在）。
+    关键设计：**不递归进入属于其他 group 的子目录**，从根源上避免
+    同一文件被重复归属到多个 group（当 group 路径存在包含关系时尤其重要，
+    例如 group='.' 与 group='src/' 同时存在）。
 
     Parameters
     ----------
-    area_abs_path : str
-        当前 area 目录的绝对路径
+    group_abs_path : str
+        当前 group 目录的绝对路径
     repo_path : str
         仓库根目录的绝对路径（用于计算 file 的相对路径）
-    other_area_abs_paths : set[str]
-        其他所有 area 的绝对路径集合；遇到匹配的子目录时跳过
+    other_group_abs_paths : set[str]
+        其他所有 group 的绝对路径集合；遇到匹配的子目录时跳过
 
     Returns
     -------
@@ -161,16 +161,16 @@ def _scan_area_files(
     """
     collected: list[dict] = []
 
-    for root, dirs, filenames in os.walk(area_abs_path, topdown=True):
+    for root, dirs, filenames in os.walk(group_abs_path, topdown=True):
         # ---------- 过滤子目录 ----------
         dirs_keep: list[str] = []
         for d in sorted(dirs):
             # 忽略列表 & 隐藏目录
             if d in _IGNORE_DIRS or d.startswith('.'):
                 continue
-            # 属于另一个独立 area 的目录 → 不递归，由该 area 自行扫描
+            # 属于另一个独立 group 的目录 → 不递归，由该 group 自行扫描
             child_abs = os.path.normpath(os.path.join(root, d))
-            if child_abs in other_area_abs_paths:
+            if child_abs in other_group_abs_paths:
                 continue
             dirs_keep.append(d)
         dirs[:] = dirs_keep
@@ -198,31 +198,31 @@ def _scan_area_files(
 
 
 # ==================================================================
-#  analyze_area_file
+#  analyze_group_file
 # ==================================================================
 
-def analyze_area_file(
+def analyze_group_file(
     repo_id: int,
     db_path: str | None = None,
     force: bool = False,
 ) -> dict[int, list[dict]]:
     """
-    扫描仓库每个 area 路径下的文件，写入 file 表并更新 area.filelist。
+    扫描仓库每个 group 路径下的文件，写入 file 表并更新 group.filelist。
 
     流程
     ----
-    1. 读取仓库信息和所有 area 记录
-    2. 预计算各 area 的绝对路径，构造互斥集合（防重叠扫描）
-    3. 对每个 area 递归扫描文件，_is_useful_file() 过滤无效文件
+    1. 读取仓库信息和所有 group 记录
+    2. 预计算各 group 的绝对路径，构造互斥集合（防重叠扫描）
+    3. 对每个 group 递归扫描文件，_is_useful_file() 过滤无效文件
     4. 将文件写入 file 表（name / path），防御性地检测路径重复
-    5. 更新 area.filelist（file_id + name，brief 留空待后续步骤填充）
-    6. 汇总写出中间产物 JSON → data/analyze_area_file/<repo_name>.json
+    5. 更新 group.filelist（file_id + name，brief 留空待后续步骤填充）
+    6. 汇总写出中间产物 JSON → data/analyze_group_file/<repo_name>.json
 
     数据库写入字段
     --------------
     - file.name   : 文件名（basename）
     - file.path   : 相对仓库根的路径，'/' 分隔
-    - area.filelist: [{"file_id": int, "name": str, "brief": ""}]
+    - group.filelist: [{"file_id": int, "name": str, "brief": ""}]
 
     Parameters
     ----------
@@ -238,7 +238,7 @@ def analyze_area_file(
     Returns
     -------
     dict[int, list[dict]]
-        键为 area_id，值为该 area 下已入库的文件列表，每项：
+        键为 group_id，值为该 group 下已入库的文件列表，每项：
         {
             "file_id": int,
             "name":    str,
@@ -249,7 +249,7 @@ def analyze_area_file(
     ------
     ValueError
         · repo_id 在数据库中不存在
-        · 该仓库尚无 area 记录（需先执行 analyze_repo_area）
+        · 该仓库尚无 group 记录（需先执行 analyze_repo_group）
         · force=False 且已有 file 记录
     """
     _db = db_path or DB_PATH
@@ -258,21 +258,21 @@ def analyze_area_file(
     repo = RepoDB.get_by_id(repo_id, db_path=_db)
     if repo is None:
         raise ValueError(
-            f"[analyze_area_file] repo_id={repo_id} 在数据库中不存在。"
+            f"[analyze_group_file] repo_id={repo_id} 在数据库中不存在。"
         )
 
     repo_path = repo['path']
     repo_name = repo['name']
-    print(f"[analyze_area_file] 目标仓库：{repo_name}（{repo_path}）")
+    print(f"[analyze_group_file] 目标仓库：{repo_name}（{repo_path}）")
 
-    # ── ② 取 area 列表 ──────────────────────────────────────────────
-    areas = AreaDB.list_by_repo(repo_id, db_path=_db)
-    if not areas:
+    # ── ② 取 group 列表 ──────────────────────────────────────────────
+    groups = GroupDB.list_by_repo(repo_id, db_path=_db)
+    if not groups:
         raise ValueError(
-            f"[analyze_area_file] repo_id={repo_id} 无 area 记录，"
-            "请先执行 analyze_repo_area。"
+            f"[analyze_group_file] repo_id={repo_id} 无 group 记录，"
+            "请先执行 analyze_repo_group。"
         )
-    print(f"[analyze_area_file] 共 {len(areas)} 个 area，开始扫描文件…")
+    print(f"[analyze_group_file] 共 {len(groups)} 个 group，开始扫描文件…")
 
     # ── ③ 处理已有 file 记录 ────────────────────────────────────────
     existing_files = FileDB.list_by_repo(repo_id, db_path=_db)
@@ -280,112 +280,112 @@ def analyze_area_file(
         if force:
             for f in existing_files:
                 FileDB.delete(f['id'], db_path=_db)
-            print(f"[analyze_area_file] 已清除 {len(existing_files)} 条旧 file 记录。")
+            print(f"[analyze_group_file] 已清除 {len(existing_files)} 条旧 file 记录。")
         else:
             raise ValueError(
-                f"[analyze_area_file] repo_id={repo_id} 已有 {len(existing_files)} 个 file 记录。"
+                f"[analyze_group_file] repo_id={repo_id} 已有 {len(existing_files)} 个 file 记录。"
                 " 如需重新扫描，请传入 force=True。"
             )
 
-    # ── ④ 预计算各 area 绝对路径 ────────────────────────────────────
+    # ── ④ 预计算各 group 绝对路径 ────────────────────────────────────
     # normpath 确保路径字符串可直接用集合匹配，Windows 下统一反斜杠
-    area_abs_map: dict[int, str] = {}
-    for area in areas:
-        rel = area['path']
+    group_abs_map: dict[int, str] = {}
+    for group in groups:
+        rel = group['path']
         abs_p = (
             repo_path
             if rel == '.'
             else os.path.normpath(os.path.join(repo_path, rel))
         )
-        area_abs_map[area['id']] = abs_p
+        group_abs_map[group['id']] = abs_p
 
-    # ── ⑤ 逐 area 扫描文件 ──────────────────────────────────────────
+    # ── ⑤ 逐 group 扫描文件 ──────────────────────────────────────────
     result: dict[int, list[dict]]   = {}
-    all_area_records: list[dict]    = []   # 用于中间产物 JSON
+    all_group_records: list[dict]    = []   # 用于中间产物 JSON
 
-    for area in areas:
-        area_id       = area['id']
-        area_name     = area['name']
-        area_path_rel = area['path']
-        area_abs      = area_abs_map[area_id]
+    for group in groups:
+        group_id       = group['id']
+        group_name     = group['name']
+        group_path_rel = group['path']
+        group_abs      = group_abs_map[group_id]
 
         # 路径不存在时发出警告并跳过（LLM 给出的路径可能已被删除/重命名）
-        if not os.path.exists(area_abs):
+        if not os.path.exists(group_abs):
             print(
-                f"[analyze_area_file] ⚠ area '{area_name}' 路径不存在，"
-                f"已跳过：{area_abs}"
+                f"[analyze_group_file] ⚠ group '{group_name}' 路径不存在，"
+                f"已跳过：{group_abs}"
             )
-            result[area_id] = []
+            result[group_id] = []
             continue
 
-        # 当前 area 以外的所有 area 绝对路径（扫描时不递归进入）
+        # 当前 group 以外的所有 group 绝对路径（扫描时不递归进入）
         other_abs: set[str] = {
-            p for aid, p in area_abs_map.items() if aid != area_id
+            p for aid, p in group_abs_map.items() if aid != group_id
         }
 
         print(
-            f"[analyze_area_file]   扫描 area [{area_id:3d}] "
-            f"'{area_name}'（{area_path_rel}）…"
+            f"[analyze_group_file]   扫描 group [{group_id:3d}] "
+            f"'{group_name}'（{group_path_rel}）…"
         )
 
-        raw_files = _scan_area_files(area_abs, repo_path, other_abs)
-        print(f"[analyze_area_file]     → 发现 {len(raw_files)} 个有效文件")
+        raw_files = _scan_group_files(group_abs, repo_path, other_abs)
+        print(f"[analyze_group_file]     → 发现 {len(raw_files)} 个有效文件")
 
         # ── ⑥ 写入 file 表 ──────────────────────────────────────────
-        area_filelist:      list[dict] = []   # 写回 area.filelist
-        area_file_records:  list[dict] = []   # 供调用方和中间产物使用
+        group_filelist:      list[dict] = []   # 写回 group.filelist
+        group_file_records:  list[dict] = []   # 供调用方和中间产物使用
 
         for file_info in raw_files:
             file_name = file_info['name']
             file_path = file_info['path']   # 相对仓库根
 
-            # 防御：若同一路径已存在（area 路径部分重叠时），不重复创建
+            # 防御：若同一路径已存在（group 路径部分重叠时），不重复创建
             existing_file = FileDB.get_by_path(repo_id, file_path, db_path=_db)
             if existing_file is not None:
                 file_id = existing_file['id']
                 print(
-                    f"[analyze_area_file]     ⚠ 路径已存在（area 路径重叠？）："
+                    f"[analyze_group_file]     ⚠ 路径已存在（group 路径重叠？）："
                     f"{file_path} → 复用 file_id={file_id}"
                 )
             else:
                 file_id = FileDB.create(
                     repo_id = repo_id,
-                    area_id = area_id,
+                    group_id = group_id,
                     name    = file_name,
                     path    = file_path,
                     db_path = _db,
                 )
 
-            area_filelist.append({
+            group_filelist.append({
                 'file_id': file_id,
                 'name':    file_name,
-                'brief':   '',      # 留给 analyze_area_filelist_description（step16）填充
+                'brief':   '',      # 留给 analyze_group_filelist_description（step16）填充
             })
-            area_file_records.append({
+            group_file_records.append({
                 'file_id': file_id,
                 'name':    file_name,
                 'path':    file_path,
             })
 
-        # ── ⑦ 更新 area.filelist ────────────────────────────────────
-        AreaDB.update(area_id, db_path=_db, filelist=area_filelist)
+        # ── ⑦ 更新 group.filelist ────────────────────────────────────
+        GroupDB.update(group_id, db_path=_db, filelist=group_filelist)
 
-        result[area_id] = area_file_records
-        all_area_records.append({
-            'area_id':    area_id,
-            'area_name':  area_name,
-            'area_path':  area_path_rel,
-            'file_count': len(area_file_records),
-            'files':      area_file_records,
+        result[group_id] = group_file_records
+        all_group_records.append({
+            'group_id':    group_id,
+            'group_name':  group_name,
+            'group_path':  group_path_rel,
+            'file_count': len(group_file_records),
+            'files':      group_file_records,
         })
 
         print(
-            f"[analyze_area_file]     ✓ '{area_name}'："
-            f"{len(area_file_records)} 个文件已入库"
+            f"[analyze_group_file]     ✓ '{group_name}'："
+            f"{len(group_file_records)} 个文件已入库"
         )
 
     # ── ⑧ 保存中间产物 JSON ─────────────────────────────────────────
-    output_dir  = os.path.join(DATA_DIR, 'analyze_area_file')
+    output_dir  = os.path.join(DATA_DIR, 'analyze_group_file')
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"{repo_name}.json")
 
@@ -395,25 +395,25 @@ def analyze_area_file(
         'repo_name': repo_name,
         'repo_path': repo_path,
         'summary': {
-            'total_areas': len(areas),
+            'total_groups': len(groups),
             'total_files': total_files,
         },
-        'areas': all_area_records,
+        'groups': all_group_records,
     }
 
     with open(output_path, 'w', encoding='utf-8') as f:
         _json.dump(intermediate, f, ensure_ascii=False, indent=2)
-    print(f"[analyze_area_file] ✓ 中间产物 → {output_path}")
+    print(f"[analyze_group_file] ✓ 中间产物 → {output_path}")
 
     print(
-        f"[analyze_area_file] ✓ 完成：{len(areas)} 个 area，"
+        f"[analyze_group_file] ✓ 完成：{len(groups)} 个 group，"
         f"共 {total_files} 个文件已入库。"
     )
     return result
 
 # ─────────────────────────────────────────────────
-# Step 15: analyze_area_filelist_brief
-# Step 16: analyze_area_description
+# Step 15: analyze_group_filelist_brief
+# Step 16: analyze_group_description
 
 import time as _time_a
 from typing import Optional
@@ -423,7 +423,7 @@ _AREA_MAX_RETRIES    = 5
 _AREA_RETRY_DELAYS   = (2, 5, 10, 20, 40)
 
 
-def _area_retry(fn, label: str = "", max_retries: int = _AREA_MAX_RETRIES):
+def _group_retry(fn, label: str = "", max_retries: int = _AREA_MAX_RETRIES):
     last_exc = None
     for i in range(max_retries):
         try:
@@ -437,20 +437,20 @@ def _area_retry(fn, label: str = "", max_retries: int = _AREA_MAX_RETRIES):
     raise RuntimeError(f"重试 {max_retries} 次失败 ({label})：{last_exc}")
 
 
-def analyze_area_filelist_brief(
+def analyze_group_filelist_brief(
     repo_id: int,
     db_path: Optional[str] = None,
     skip_if_exists: bool = True,
 ) -> dict[int, list]:
     """
-    为仓库内每个 area 的 filelist 生成 brief，
-    批量写入 area.filelist 的 brief 字段。
+    为仓库内每个 group 的 filelist 生成 brief，
+    批量写入 group.filelist 的 brief 字段。
 
     依赖：file.description 已完成（Step 14）。
 
     Returns
     -------
-    dict[int, list]  {area_id → 更新后的 filelist}
+    dict[int, list]  {group_id → 更新后的 filelist}
     """
     from llm.client  import chat_completion_json
     from llm.prompts import (
@@ -462,21 +462,21 @@ def analyze_area_filelist_brief(
     _db   = db_path or DB_PATH
     repo  = RepoDB.get_by_id(repo_id, db_path=_db)
     if repo is None:
-        raise ValueError(f"[analyze_area_filelist_brief] repo_id={repo_id} 不存在。")
+        raise ValueError(f"[analyze_group_filelist_brief] repo_id={repo_id} 不存在。")
 
-    areas = AreaDB.list_by_repo(repo_id, db_path=_db)
+    groups = GroupDB.list_by_repo(repo_id, db_path=_db)
     print(
-        f"[analyze_area_filelist_brief] 目标仓库：{repo['name']}，"
-        f"共 {len(areas)} 个 area"
+        f"[analyze_group_filelist_brief] 目标仓库：{repo['name']}，"
+        f"共 {len(groups)} 个 group"
     )
 
     result: dict[int, list] = {}
     processed = skipped = error = 0
 
-    for area_rec in areas:
-        area_id   = area_rec["id"]
-        area_name = area_rec["name"]
-        filelist  = area_rec.get("filelist") or []
+    for group_rec in groups:
+        group_id   = group_rec["id"]
+        group_name = group_rec["name"]
+        filelist  = group_rec.get("filelist") or []
         if isinstance(filelist, str):
             try:
                 filelist = _j.loads(filelist)
@@ -484,12 +484,12 @@ def analyze_area_filelist_brief(
                 filelist = []
 
         if not filelist:
-            result[area_id] = []
+            result[group_id] = []
             skipped += 1
             continue
 
         if skip_if_exists and all(e.get("brief") for e in filelist):
-            result[area_id] = filelist
+            result[group_id] = filelist
             skipped += 1
             continue
 
@@ -510,7 +510,7 @@ def analyze_area_filelist_brief(
 
         file_list_text = "\n---\n".join(file_lines)
         user_content   = ANALYZE_AREA_FILELIST_BRIEF_USER.format(
-            area_name      = area_name,
+            group_name      = group_name,
             file_count     = len(filelist),
             file_list_text = file_list_text,
         )
@@ -523,10 +523,10 @@ def analyze_area_filelist_brief(
             def _call():
                 return chat_completion_json(messages=messages, temperature=0.1)
 
-            raw = _area_retry(_call, label=f"area_id={area_id} {area_name}")
+            raw = _group_retry(_call, label=f"group_id={group_id} {group_name}")
         except Exception as exc:
-            print(f"[analyze_area_filelist_brief]   ✗ {area_name}：{exc}")
-            result[area_id] = filelist
+            print(f"[analyze_group_filelist_brief]   ✗ {group_name}：{exc}")
+            result[group_id] = filelist
             error += 1
             continue
 
@@ -543,34 +543,34 @@ def analyze_area_filelist_brief(
                 new_entry["brief"] = brief_map[fid]
             new_filelist.append(new_entry)
 
-        AreaDB.update(area_id, db_path=_db, filelist=new_filelist)
-        result[area_id] = new_filelist
+        GroupDB.update(group_id, db_path=_db, filelist=new_filelist)
+        result[group_id] = new_filelist
         processed += 1
         print(
-            f"[analyze_area_filelist_brief]   ✓ {area_name}"
+            f"[analyze_group_filelist_brief]   ✓ {group_name}"
             f"  files={len(new_filelist)}  briefs_updated={len(brief_map)}"
         )
 
     print(
-        f"[analyze_area_filelist_brief] ✓ 完成："
+        f"[analyze_group_filelist_brief] ✓ 完成："
         f"处理={processed}  跳过={skipped}  失败={error}"
     )
     return result
 
 
-def analyze_area_description(
+def analyze_group_description(
     repo_id: int,
     db_path: Optional[str] = None,
     skip_if_exists: bool = True,
 ) -> dict[int, str]:
     """
-    为仓库内每个 area 生成自然语言描述，写入 area.description。
+    为仓库内每个 group 生成自然语言描述，写入 group.description。
 
     依赖：file.description 已完成（Step 14）。
 
     Returns
     -------
-    dict[int, str]  {area_id → description_text}
+    dict[int, str]  {group_id → description_text}
     """
     from llm.client  import chat_completion
     from llm.prompts import (
@@ -582,30 +582,30 @@ def analyze_area_description(
     _db   = db_path or DB_PATH
     repo  = RepoDB.get_by_id(repo_id, db_path=_db)
     if repo is None:
-        raise ValueError(f"[analyze_area_description] repo_id={repo_id} 不存在。")
+        raise ValueError(f"[analyze_group_description] repo_id={repo_id} 不存在。")
 
-    areas = AreaDB.list_by_repo(repo_id, db_path=_db)
+    groups = GroupDB.list_by_repo(repo_id, db_path=_db)
     print(
-        f"[analyze_area_description] 目标仓库：{repo['name']}，"
-        f"共 {len(areas)} 个 area"
+        f"[analyze_group_description] 目标仓库：{repo['name']}，"
+        f"共 {len(groups)} 个 group"
     )
 
     result:   dict[int, str] = {}
     processed = skipped = error = 0
 
-    for area_rec in areas:
-        area_id   = area_rec["id"]
-        area_name = area_rec["name"]
-        area_path = area_rec.get("path", "")
-        rationale = area_rec.get("rationale", "")
+    for group_rec in groups:
+        group_id   = group_rec["id"]
+        group_name = group_rec["name"]
+        group_path = group_rec.get("path", "")
+        rationale = group_rec.get("rationale", "")
 
-        if skip_if_exists and area_rec.get("description"):
-            result[area_id] = area_rec["description"]
+        if skip_if_exists and group_rec.get("description"):
+            result[group_id] = group_rec["description"]
             skipped += 1
             continue
 
         # 文件结构列表
-        filelist = area_rec.get("filelist") or []
+        filelist = group_rec.get("filelist") or []
         if isinstance(filelist, str):
             try:
                 filelist = _j.loads(filelist)
@@ -633,8 +633,8 @@ def analyze_area_description(
         file_descriptions = "\n\n".join(file_desc_parts) or "（无文件描述）"
 
         user_content = ANALYZE_AREA_DESCRIPTION_USER.format(
-            area_name         = area_name,
-            area_path         = area_path,
+            group_name         = group_name,
+            group_path         = group_path,
             rationale         = rationale or "（未提供）",
             file_structure    = file_structure,
             file_descriptions = file_descriptions,
@@ -648,21 +648,21 @@ def analyze_area_description(
             def _call():
                 return chat_completion(messages=messages, temperature=0.2)
 
-            desc = _area_retry(_call, label=f"area_id={area_id} {area_name}")
+            desc = _group_retry(_call, label=f"group_id={group_id} {group_name}")
             desc = desc.strip()
         except Exception as exc:
-            print(f"[analyze_area_description]   ✗ {area_name}：{exc}")
-            result[area_id] = ""
+            print(f"[analyze_group_description]   ✗ {group_name}：{exc}")
+            result[group_id] = ""
             error += 1
             continue
 
-        AreaDB.update(area_id, db_path=_db, description=desc)
-        result[area_id] = desc
+        GroupDB.update(group_id, db_path=_db, description=desc)
+        result[group_id] = desc
         processed += 1
-        print(f"[analyze_area_description]   ✓ {area_name}  ({len(desc)} 字符)")
+        print(f"[analyze_group_description]   ✓ {group_name}  ({len(desc)} 字符)")
 
     print(
-        f"[analyze_area_description] ✓ 完成："
+        f"[analyze_group_description] ✓ 完成："
         f"处理={processed}  跳过={skipped}  失败={error}"
     )
     return result

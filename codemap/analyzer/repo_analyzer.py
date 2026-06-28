@@ -6,7 +6,7 @@ CodeMAP 仓库层分析器
 实现：
   - init_repo              : 初始化仓库记录，建库建表，写入 repo:name / repo:path
   - analyze_repo_language  : 扫描仓库文件，统计语言字节数和占比，写入 repo:language
-  - analyze_repo_area      : LLM 分析仓库模块划分，写入 area 表 / repo:arealist
+  - analyze_repo_group      : LLM 分析仓库模块划分，写入 group 表 / repo:grouplist
 """
 
 import json as _json
@@ -15,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from db.dao import init_db, RepoDB, AreaDB
+from db.dao import init_db, RepoDB, GroupDB
 from config import DB_PATH, DATA_DIR
 
 # ------------------------------------------------------------------
@@ -334,7 +334,7 @@ def analyze_repo_language(
     return language_data
 
 # ==================================================================
-#  analyze_repo_area —— 辅助：目录树 & README
+#  analyze_repo_group —— 辅助：目录树 & README
 # ==================================================================
 
 def _build_dir_tree(repo_path: str, max_depth: int = 3, max_chars: int = 8000) -> str:
@@ -417,7 +417,7 @@ def _read_readme(repo_path: str, max_chars: int = 3000) -> str:
                 content = f.read(max_chars)
             file_size = os.path.getsize(full_path)
             suffix = '\n\n...(README 已截断，仅展示前部分)' if file_size > max_chars else ''
-            print(f"[analyze_repo_area] 读取 README：{name}（{len(content)} 字符）")
+            print(f"[analyze_repo_group] 读取 README：{name}（{len(content)} 字符）")
             return content + suffix
         except OSError:
             continue
@@ -425,27 +425,27 @@ def _read_readme(repo_path: str, max_chars: int = 3000) -> str:
 
 
 # ==================================================================
-#  analyze_repo_area
+#  analyze_repo_group
 # ==================================================================
 
-def analyze_repo_area(
+def analyze_repo_group(
     repo_id: int,
     db_path: str | None = None,
     force: bool = False,
 ) -> list[dict]:
     """
-    使用 LLM 对仓库进行模块划分（area 分层），并将结果持久化到数据库和中间文件。
+    使用 LLM 对仓库进行模块划分（group 分层），并将结果持久化到数据库和中间文件。
 
     流程
     ----
     1. 构建仓库目录树（最多 3 层）
     2. 读取 README（作为 LLM 背景输入）
-    3. 调用 LLM 生成 area 划分方案（name / path / rationale / brief）
+    3. 调用 LLM 生成 group 划分方案（name / path / rationale / brief）
     4. 校验 LLM 给出的 path 在磁盘上确实存在，去掉无效项
-    5. 中间产物 JSON → data/analyze_repo_area/<repo_name>.json
+    5. 中间产物 JSON → data/analyze_repo_group/<repo_name>.json
     6. 写数据库：
-       - area 表：为每个 area 创建记录（name / path / rationale）
-       - repo 表：更新 arealist 字段（存简要索引）
+       - group 表：为每个 group 创建记录（name / path / rationale）
+       - repo 表：更新 grouplist 字段（存简要索引）
 
     Parameters
     ----------
@@ -454,14 +454,14 @@ def analyze_repo_area(
     db_path : str | None
         SQLite 数据库路径；不传则使用 config.DB_PATH
     force : bool
-        若已存在 area 记录，True = 先删除再重建，False = 抛出 ValueError
+        若已存在 group 记录，True = 先删除再重建，False = 抛出 ValueError
 
     Returns
     -------
     list[dict]
-        已入库的 area 信息列表，每项：
+        已入库的 group 信息列表，每项：
         {
-            "area_id":   int,
+            "group_id":   int,
             "name":      str,
             "path":      str,   # 相对仓库根
             "rationale": str,
@@ -471,7 +471,7 @@ def analyze_repo_area(
     Raises
     ------
     ValueError
-        repo_id 不存在 / force=False 且已有 area 记录 / LLM 无有效输出
+        repo_id 不存在 / force=False 且已有 group 记录 / LLM 无有效输出
     RuntimeError
         LLM API 调用失败
     """
@@ -481,23 +481,23 @@ def analyze_repo_area(
     repo = RepoDB.get_by_id(repo_id, db_path=_db)
     if repo is None:
         raise ValueError(
-            f"[analyze_repo_area] repo_id={repo_id} 在数据库中不存在。"
+            f"[analyze_repo_group] repo_id={repo_id} 在数据库中不存在。"
         )
 
     repo_path = repo['path']
     repo_name = repo['name']
-    print(f"[analyze_repo_area] 目标仓库：{repo_name}（{repo_path}）")
+    print(f"[analyze_repo_group] 目标仓库：{repo_name}（{repo_path}）")
 
-    # ── ② 处理已有 area 记录 ────────────────────────────────────────
-    existing = AreaDB.list_by_repo(repo_id, db_path=_db)
+    # ── ② 处理已有 group 记录 ────────────────────────────────────────
+    existing = GroupDB.list_by_repo(repo_id, db_path=_db)
     if existing:
         if force:
             for a in existing:
-                AreaDB.delete(a['id'], db_path=_db)
-            print(f"[analyze_repo_area] 已清除 {len(existing)} 条旧 area 记录。")
+                GroupDB.delete(a['id'], db_path=_db)
+            print(f"[analyze_repo_group] 已清除 {len(existing)} 条旧 group 记录。")
         else:
             raise ValueError(
-                f"[analyze_repo_area] repo_id={repo_id} 已有 {len(existing)} 个 area 记录。"
+                f"[analyze_repo_group] repo_id={repo_id} 已有 {len(existing)} 个 group 记录。"
                 " 如需重新分析，请传入 force=True。"
             )
 
@@ -513,7 +513,7 @@ def analyze_repo_area(
     readme_content = _read_readme(repo_path)
 
     print(
-        f"[analyze_repo_area] 上下文准备完毕 | "
+        f"[analyze_repo_group] 上下文准备完毕 | "
         f"主语言：{main_language} | "
         f"目录树：{len(dir_tree)} 字符 | "
         f"README：{len(readme_content)} 字符"
@@ -537,18 +537,18 @@ def analyze_repo_area(
         {"role": "user",   "content": user_content},
     ]
 
-    print(f"[analyze_repo_area] 调用 LLM（模型：{_cfg.LLM_MODEL}）…")
+    print(f"[analyze_repo_group] 调用 LLM（模型：{_cfg.LLM_MODEL}）…")
     llm_raw = chat_completion_json(messages=messages, temperature=0.3)
-    print(f"[analyze_repo_area] LLM 响应已接收，开始解析…")
+    print(f"[analyze_repo_group] LLM 响应已接收，开始解析…")
 
     # ── ⑤ 解析 LLM 输出结构 ────────────────────────────────────────
-    if isinstance(llm_raw, dict) and 'areas' in llm_raw:
-        areas_raw: list[dict] = llm_raw['areas']
+    if isinstance(llm_raw, dict) and 'groups' in llm_raw:
+        groups_raw: list[dict] = llm_raw['groups']
     elif isinstance(llm_raw, list):
-        areas_raw = llm_raw
+        groups_raw = llm_raw
     else:
         raise ValueError(
-            f"[analyze_repo_area] LLM 输出结构不符合预期（类型：{type(llm_raw)}）：\n"
+            f"[analyze_repo_group] LLM 输出结构不符合预期（类型：{type(llm_raw)}）：\n"
             f"{_json.dumps(llm_raw, ensure_ascii=False, indent=2)[:600]}"
         )
 
@@ -556,7 +556,7 @@ def analyze_repo_area(
     seen_paths: set[str] = set()
     validated:  list[dict] = []
 
-    for item in areas_raw:
+    for item in groups_raw:
         name      = str(item.get('name',      '')).strip()
         path      = str(item.get('path',      '')).strip()
         rationale = str(item.get('rationale', '')).strip()
@@ -564,19 +564,19 @@ def analyze_repo_area(
 
         # 必填字段检查
         if not name or not path:
-            print(f"[analyze_repo_area] ⚠ 跳过缺少 name/path 的条目：{item}")
+            print(f"[analyze_repo_group] ⚠ 跳过缺少 name/path 的条目：{item}")
             continue
 
         # 路径去重
         if path in seen_paths:
-            print(f"[analyze_repo_area] ⚠ 跳过重复 path：{path}")
+            print(f"[analyze_repo_group] ⚠ 跳过重复 path：{path}")
             continue
         seen_paths.add(path)
 
         # 磁盘存在性校验
         abs_path = repo_path if path == '.' else os.path.join(repo_path, path)
         if not os.path.exists(abs_path):
-            print(f"[analyze_repo_area] ⚠ path 在磁盘上不存在，已跳过：{path}")
+            print(f"[analyze_repo_group] ⚠ path 在磁盘上不存在，已跳过：{path}")
             continue
 
         validated.append({
@@ -588,11 +588,11 @@ def analyze_repo_area(
 
     if not validated:
         raise ValueError(
-            "[analyze_repo_area] 所有 LLM 输出的 area 均未通过校验，请查看上方日志。"
+            "[analyze_repo_group] 所有 LLM 输出的 group 均未通过校验，请查看上方日志。"
         )
 
     # ── ⑦ 保存中间产物 JSON ─────────────────────────────────────────
-    output_dir = os.path.join(DATA_DIR, 'analyze_repo_area')
+    output_dir = os.path.join(DATA_DIR, 'analyze_repo_group')
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"{repo_name}.json")
 
@@ -602,47 +602,47 @@ def analyze_repo_area(
         'repo_path':     repo_path,
         'main_language': main_language,
         'llm_raw':       llm_raw,
-        'areas':         validated,
+        'groups':         validated,
     }
     with open(output_path, 'w', encoding='utf-8') as f:
         _json.dump(intermediate, f, ensure_ascii=False, indent=2)
-    print(f"[analyze_repo_area] ✓ 中间产物 → {output_path}")
+    print(f"[analyze_repo_group] ✓ 中间产物 → {output_path}")
 
     # ── ⑧ 写入数据库 ────────────────────────────────────────────────
-    arealist: list[dict] = []
+    grouplist: list[dict] = []
 
-    for area_data in validated:
-        area_id = AreaDB.create(
+    for group_data in validated:
+        group_id = GroupDB.create(
             repo_id   = repo_id,
-            name      = area_data['name'],
-            path      = area_data['path'],
-            rationale = area_data['rationale'],
+            name      = group_data['name'],
+            path      = group_data['path'],
+            rationale = group_data['rationale'],
             db_path   = _db,
         )
-        area_data['area_id'] = area_id  # 回写 id，供调用方使用
+        group_data['group_id'] = group_id  # 回写 id，供调用方使用
 
-        arealist.append({
-            'area_id': area_id,
-            'name':    area_data['name'],
-            'brief':   area_data['brief'],
+        grouplist.append({
+            'group_id': group_id,
+            'name':    group_data['name'],
+            'brief':   group_data['brief'],
         })
 
         print(
-            f"[analyze_repo_area]   + [{area_id:3d}] "
-            f"{area_data['name']:30s}  path={area_data['path']}"
+            f"[analyze_repo_group]   + [{group_id:3d}] "
+            f"{group_data['name']:30s}  path={group_data['path']}"
         )
 
-    # 更新 repo.arealist（简要索引）
-    RepoDB.update(repo_id, db_path=_db, arealist=arealist)
+    # 更新 repo.grouplist（简要索引）
+    RepoDB.update(repo_id, db_path=_db, grouplist=grouplist)
 
     print(
-        f"[analyze_repo_area] ✓ 完成：{len(validated)} 个 area 已入库，"
-        f"repo.arealist 已更新。"
+        f"[analyze_repo_group] ✓ 完成：{len(validated)} 个 group 已入库，"
+        f"repo.grouplist 已更新。"
     )
     return validated
 
 # ─────────────────────────────────────────────
-# Step 17: analyze_repo_arealist_brief
+# Step 17: analyze_repo_grouplist_brief
 # Step 18: analyze_repo_description
 
 import time as _time_r
@@ -667,19 +667,19 @@ def _repo_retry(fn, label: str = "", max_retries: int = _REPO_MAX_RETRIES):
     raise RuntimeError(f"重试 {max_retries} 次失败 ({label})：{last_exc}")
 
 
-def analyze_repo_arealist_brief(
+def analyze_repo_grouplist_brief(
     repo_id: int,
     db_path: str | None = None,
     skip_if_exists: bool = True,
 ) -> list[dict]:
     """
-    为 repo.arealist 中每个 area 生成 brief，写回 repo.arealist。
+    为 repo.grouplist 中每个 group 生成 brief，写回 repo.grouplist。
 
-    依赖：area.description 已完成（Step 16）。
+    依赖：group.description 已完成（Step 16）。
 
     Returns
     -------
-    list[dict]  更新后的 arealist
+    list[dict]  更新后的 grouplist
     """
     from llm.client  import chat_completion_json
     from llm.prompts import (
@@ -691,43 +691,43 @@ def analyze_repo_arealist_brief(
     _db  = db_path or DB_PATH
     repo = RepoDB.get_by_id(repo_id, db_path=_db)
     if repo is None:
-        raise ValueError(f"[analyze_repo_arealist_brief] repo_id={repo_id} 不存在。")
+        raise ValueError(f"[analyze_repo_grouplist_brief] repo_id={repo_id} 不存在。")
 
-    arealist = repo.get("arealist") or []
-    if isinstance(arealist, str):
+    grouplist = repo.get("grouplist") or []
+    if isinstance(grouplist, str):
         try:
-            arealist = _j.loads(arealist)
+            grouplist = _j.loads(grouplist)
         except Exception:
-            arealist = []
+            grouplist = []
 
-    if not arealist:
-        print("[analyze_repo_arealist_brief] arealist 为空，跳过。")
+    if not grouplist:
+        print("[analyze_repo_grouplist_brief] grouplist 为空，跳过。")
         return []
 
-    if skip_if_exists and all(e.get("brief") for e in arealist):
-        print("[analyze_repo_arealist_brief] 所有 area 已有 brief，跳过。")
-        return arealist
+    if skip_if_exists and all(e.get("brief") for e in grouplist):
+        print("[analyze_repo_grouplist_brief] 所有 group 已有 brief，跳过。")
+        return grouplist
 
-    # 收集各 area 描述
-    area_lines: list[str] = []
-    for entry in arealist:
-        aid   = entry.get("area_id")
+    # 收集各 group 描述
+    group_lines: list[str] = []
+    for entry in grouplist:
+        aid   = entry.get("group_id")
         aname = entry.get("name", "")
         if aid:
-            area_rec = AreaDB.get_by_id(aid, db_path=_db)
-            desc     = (area_rec or {}).get("description", "") or ""
+            group_rec = GroupDB.get_by_id(aid, db_path=_db)
+            desc     = (group_rec or {}).get("description", "") or ""
             desc     = desc[:_REPO_MAX_AREA_DESC]
         else:
             desc = ""
         if not desc:
-            desc = f"[area 名称] {aname}"
-        area_lines.append(f"area_id={aid}  name={aname}\n描述：{desc}\n")
+            desc = f"[group 名称] {aname}"
+        group_lines.append(f"group_id={aid}  name={aname}\n描述：{desc}\n")
 
-    area_list_text = "\n---\n".join(area_lines)
+    group_list_text = "\n---\n".join(group_lines)
     user_content   = ANALYZE_REPO_AREALIST_BRIEF_USER.format(
         repo_name      = repo["name"],
-        area_count     = len(arealist),
-        area_list_text = area_list_text,
+        group_count     = len(grouplist),
+        group_list_text = group_list_text,
     )
     messages = [
         {"role": "system", "content": ANALYZE_REPO_AREALIST_BRIEF_SYSTEM},
@@ -738,30 +738,30 @@ def analyze_repo_arealist_brief(
         def _call():
             return chat_completion_json(messages=messages, temperature=0.1)
 
-        raw = _repo_retry(_call, label=f"repo={repo['name']} arealist_brief")
+        raw = _repo_retry(_call, label=f"repo={repo['name']} grouplist_brief")
     except Exception as exc:
-        print(f"[analyze_repo_arealist_brief] ✗ LLM 调用失败：{exc}")
-        return arealist
+        print(f"[analyze_repo_grouplist_brief] ✗ LLM 调用失败：{exc}")
+        return grouplist
 
     briefs_list = raw.get("briefs", []) if isinstance(raw, dict) else []
-    brief_map   = {int(b["area_id"]): b["brief"]
+    brief_map   = {int(b["group_id"]): b["brief"]
                    for b in briefs_list
-                   if isinstance(b, dict) and b.get("area_id") is not None}
+                   if isinstance(b, dict) and b.get("group_id") is not None}
 
-    new_arealist = []
-    for entry in arealist:
+    new_grouplist = []
+    for entry in grouplist:
         new_entry = dict(entry)
-        aid = entry.get("area_id")
+        aid = entry.get("group_id")
         if aid and aid in brief_map:
             new_entry["brief"] = brief_map[aid]
-        new_arealist.append(new_entry)
+        new_grouplist.append(new_entry)
 
-    RepoDB.update(repo_id, db_path=_db, arealist=new_arealist)
+    RepoDB.update(repo_id, db_path=_db, grouplist=new_grouplist)
     print(
-        f"[analyze_repo_arealist_brief] ✓ 完成："
-        f"areas={len(new_arealist)}  briefs_updated={len(brief_map)}"
+        f"[analyze_repo_grouplist_brief] ✓ 完成："
+        f"groups={len(new_grouplist)}  briefs_updated={len(brief_map)}"
     )
-    return new_arealist
+    return new_grouplist
 
 
 def analyze_repo_description(
@@ -772,7 +772,7 @@ def analyze_repo_description(
     """
     为仓库生成自然语言描述，写入 repo.description。
 
-    依赖：area.description 已完成（Step 16）。
+    依赖：group.description 已完成（Step 16）。
 
     Returns
     -------
@@ -818,43 +818,43 @@ def analyze_repo_description(
     # README
     readme_content = _read_readme(repo_path)
 
-    # area 结构 + 描述
-    areas      = AreaDB.list_by_repo(repo_id, db_path=_db)
-    arealist   = repo.get("arealist") or []
-    if isinstance(arealist, str):
+    # group 结构 + 描述
+    groups      = GroupDB.list_by_repo(repo_id, db_path=_db)
+    grouplist   = repo.get("grouplist") or []
+    if isinstance(grouplist, str):
         try:
-            arealist = _j.loads(arealist)
+            grouplist = _j.loads(grouplist)
         except Exception:
-            arealist = []
+            grouplist = []
 
-    brief_map  = {e.get("area_id"): e.get("brief", "") for e in arealist}
+    brief_map  = {e.get("group_id"): e.get("brief", "") for e in grouplist}
 
-    area_structure_lines: list[str] = []
-    area_desc_parts:      list[str] = []
+    group_structure_lines: list[str] = []
+    group_desc_parts:      list[str] = []
 
-    for area in areas:
-        aid   = area["id"]
-        aname = area["name"]
-        apath = area["path"]
+    for group in groups:
+        aid   = group["id"]
+        aname = group["name"]
+        apath = group["path"]
         brief = brief_map.get(aid, "")
-        area_structure_lines.append(f"  [{aname}]  path={apath}  {brief}")
+        group_structure_lines.append(f"  [{aname}]  path={apath}  {brief}")
 
-        desc = area.get("description", "") or ""
-        area_desc_parts.append(
+        desc = group.get("description", "") or ""
+        group_desc_parts.append(
             f"### {aname}（{apath}）\n{desc[:_REPO_MAX_AREA_DESC] or '（暂无描述）'}"
         )
 
-    area_structure  = "\n".join(area_structure_lines) or "（无 area 记录）"
-    area_descriptions = "\n\n".join(area_desc_parts) or "（无 area 描述）"
+    group_structure  = "\n".join(group_structure_lines) or "（无 group 记录）"
+    group_descriptions = "\n\n".join(group_desc_parts) or "（无 group 描述）"
 
     user_content = ANALYZE_REPO_DESCRIPTION_USER.format(
         repo_name         = repo_name,
         main_language     = main_language,
         language_stats    = language_stats or "（未知）",
         dir_tree          = dir_tree,
-        area_structure    = area_structure,
+        group_structure    = group_structure,
         readme_content    = readme_content,
-        area_descriptions = area_descriptions,
+        group_descriptions = group_descriptions,
     )
     messages = [
         {"role": "system", "content": ANALYZE_REPO_DESCRIPTION_SYSTEM},

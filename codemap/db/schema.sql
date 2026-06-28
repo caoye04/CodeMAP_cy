@@ -16,22 +16,22 @@ CREATE TABLE IF NOT EXISTS repo (
     -- language: {"main": "C", "stats": [{"lang": "C", "pct": 80.2, "bytes": 123456}, ...]}
     language    TEXT,
     description TEXT,                             -- LLM 生成的仓库描述
-    -- arealist: [{"area_id": 1, "name": "core", "brief": "核心压缩逻辑"}, ...]
-    arealist    TEXT,
+    -- grouplist: [{"group_id": 1, "name": "core", "brief": "核心压缩逻辑"}, ...]
+    grouplist    TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ============================================================
---  area 包/模块层
+--  group 包/模块层
 -- ============================================================
-CREATE TABLE IF NOT EXISTS area (
+CREATE TABLE IF NOT EXISTS group (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_id     INTEGER NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
-    name        TEXT    NOT NULL,                 -- area 名称，如 "compress"
+    name        TEXT    NOT NULL,                 -- group 名称，如 "compress"
     path        TEXT    NOT NULL,                 -- 相对仓库根的路径，如 "src/compress"
     rationale   TEXT,                             -- LLM 给出的分层依据（自然语言）
-    description TEXT,                             -- LLM 生成的 area 描述
+    description TEXT,                             -- LLM 生成的 group 描述
     -- filelist: [{"file_id": 3, "name": "deflate.c", "brief": "实现 DEFLATE 压缩"}, ...]
     filelist    TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS area (
 CREATE TABLE IF NOT EXISTS file (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_id     INTEGER NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
-    area_id     INTEGER NOT NULL REFERENCES area(id) ON DELETE CASCADE,
+    group_id     INTEGER NOT NULL REFERENCES group(id) ON DELETE CASCADE,
     name        TEXT    NOT NULL,                 -- 文件名，如 "deflate.c"
     path        TEXT    NOT NULL,                 -- 相对仓库根的完整路径
     language    TEXT,                             -- "C" / "C++" / "Python" 等
@@ -63,17 +63,17 @@ CREATE TABLE IF NOT EXISTS file (
 CREATE TABLE IF NOT EXISTS func (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_id         INTEGER NOT NULL REFERENCES repo(id)  ON DELETE CASCADE,
-    area_id         INTEGER NOT NULL REFERENCES area(id)  ON DELETE CASCADE,
+    group_id         INTEGER NOT NULL REFERENCES group(id)  ON DELETE CASCADE,
     file_id         INTEGER NOT NULL REFERENCES file(id)  ON DELETE CASCADE,
     name            TEXT    NOT NULL,             -- 函数名
     signature       TEXT,                         -- 完整签名（兼容 C++ 重载）
     -- place: {"file_path": "src/deflate.c", "start_line": 42, "end_line": 105}
     place           TEXT,
-    -- io: {
-    --   "params": [{"name": "strm", "type": "z_streamp", "desc": "压缩流指针"}],
-    --   "returns": {"type": "int", "desc": "Z_OK 或错误码"}
+    -- interface: {
+    --   "params": [{"name": "strm", "type": "z_streamp"}],
+    --   "returns": {"type": "int"}
     -- }
-    io              TEXT,
+    interface              TEXT,
     -- callgraph: {
     --   "callers": [{"name": "compress2", "file": "compress.c", "type": "user"}],
     --   "callees": [{"name": "memset", "file": "<stdlib.h>", "type": "lib"}]
@@ -99,10 +99,9 @@ CREATE TABLE IF NOT EXISTS func (
     --   "llm_summary": "..."
     -- }
     exception       TEXT,
-    description     TEXT,                         -- LLM 生成的函数完整描述
+    description     TEXT, 
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    -- 同文件内函数名+起始行唯一，支持 C++ 重载场景
     UNIQUE(file_id, name, signature)
 );
 
@@ -113,9 +112,9 @@ CREATE TRIGGER IF NOT EXISTS trg_repo_updated
     AFTER UPDATE ON repo FOR EACH ROW
     BEGIN UPDATE repo SET updated_at = datetime('now') WHERE id = OLD.id; END;
 
-CREATE TRIGGER IF NOT EXISTS trg_area_updated
-    AFTER UPDATE ON area FOR EACH ROW
-    BEGIN UPDATE area SET updated_at = datetime('now') WHERE id = OLD.id; END;
+CREATE TRIGGER IF NOT EXISTS trg_group_updated
+    AFTER UPDATE ON group FOR EACH ROW
+    BEGIN UPDATE group SET updated_at = datetime('now') WHERE id = OLD.id; END;
 
 CREATE TRIGGER IF NOT EXISTS trg_file_updated
     AFTER UPDATE ON file FOR EACH ROW
@@ -128,8 +127,8 @@ CREATE TRIGGER IF NOT EXISTS trg_func_updated
 -- ============================================================
 --  常用查询索引
 -- ============================================================
-CREATE INDEX IF NOT EXISTS idx_area_repo   ON area(repo_id);
-CREATE INDEX IF NOT EXISTS idx_file_area   ON file(area_id);
+CREATE INDEX IF NOT EXISTS idx_group_repo   ON group(repo_id);
+CREATE INDEX IF NOT EXISTS idx_file_group   ON file(group_id);
 CREATE INDEX IF NOT EXISTS idx_file_repo   ON file(repo_id);
 CREATE INDEX IF NOT EXISTS idx_func_file   ON func(file_id);
 CREATE INDEX IF NOT EXISTS idx_func_repo   ON func(repo_id);

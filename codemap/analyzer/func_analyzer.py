@@ -1,18 +1,5 @@
 """
 analyzer/func_analyzer.py
-CodeMAP 函数层分析器（Step 7）
-
-实现：
-  - analyze_func_precondition  : SA + LLM 分析函数前置条件，写入 func:precondition
-  - analyze_func_postcondition : SA + LLM 分析函数后置条件，写入 func:postcondition
-  - analyze_func_exception     : SA + LLM 分析函数异常处理，写入 func:exception
-
-存储格式：["自然语言条目1", "条目2", ...] 纯字符串列表，无嵌套。
-
-SA 策略：
-  C / C++ / Objective-C → tree-sitter AST + 正则双重提取
-  Python                → ast 模块 + 正则双重提取
-  其他语言               → 正则兜底
 """
 
 import ast
@@ -20,7 +7,7 @@ import json as _json
 import os
 import re
 import sys
-import time                          # ← 新增：重试等待
+import time
 from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -928,15 +915,15 @@ def analyze_func_summary(
             sa_combined = {}
 
         # 准备 prompt 参数
-        io = fn_rec.get('io') or {}
-        if isinstance(io, str):
+        interface = fn_rec.get('interface') or {}
+        if isinstance(interface, str):
             try:
-                io = _json.loads(io)
+                interface = _json.loads(interface)
             except Exception:
-                io = {}
+                interface = {}
 
-        params_text  = _format_params(io.get('params', []))
-        return_type  = (io.get('returns') or {}).get('type', '') or ''
+        params_text  = _format_params(interface.get('params', []))
+        return_type  = (interface.get('returns') or {}).get('type', '') or ''
         source_trunc = source[:_MAX_SOURCE_IN_PROMPT]
         if len(source) > _MAX_SOURCE_IN_PROMPT:
             source_trunc += f'\n... (源码截断，原长 {len(source)} 字符)'

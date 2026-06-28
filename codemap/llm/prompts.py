@@ -8,28 +8,28 @@ llm/prompts.py
 """
 
 # ==================================================================
-#  Step 3: analyze_repo_area —— 仓库模块划分
+#  Step 3: analyze_repo_group —— 仓库模块划分
 # ==================================================================
 
 ANALYZE_REPO_AREA_SYSTEM = """\
 你是一位资深软件架构师，擅长分析代码仓库结构并识别逻辑模块边界。
 
 ## 任务
-根据给定的仓库目录结构和背景信息，将仓库划分为若干个逻辑 "area"（功能区域/模块），\
-每个 area 代表一个内聚的功能单元。
+根据给定的仓库目录结构和背景信息，将仓库划分为若干个逻辑 "group"（功能区域/模块），\
+每个 group 代表一个内聚的功能单元。
 
-## Area 概念说明
-- 一个 area 通常对应一个独立的目录，但根目录下的核心散落文件也可构成一个 area
-- 粒度适中：3-12 个 area 为宜（小型库偏少，大型单体仓库可更多）
-- 每个 area 应具有明确、独立的职责，与其他 area 低耦合
+## Group 概念说明
+- 一个 group 通常对应一个独立的目录，但根目录下的核心散落文件也可构成一个 group
+- 粒度适中：3-12 个 group 为宜（小型库偏少，大型单体仓库可更多）
+- 每个 group 应具有明确、独立的职责，与其他 group 低耦合
 
 ## 严格输出要求
 只输出合法 JSON，结构如下，不得包含任何额外解释文字：
 ```json
 {
-  "areas": [
+  "groups": [
     {
-      "name":      "area 的英文短名称（snake_case，如 core_compression）",
+      "name":      "group 的英文短名称（snake_case，如 core_compression）",
       "path":      "相对仓库根的路径，如 'src/compress'；根目录用 '.'",
       "rationale": "分层依据（中文，1-3句，说明为何这是独立功能模块）",
       "brief":     "一句话简短描述（中文，不超过25字）"
@@ -42,7 +42,7 @@ ANALYZE_REPO_AREA_SYSTEM = """\
 path 必须是目录树中真实存在的路径（目录或 "."），不得捏造
 同一 path 不得重复出现
 不要把 .git、build、dist、pycache、node_modules 等构建/版本控制目录列入
-若仓库根目录本身包含大量核心代码（无明显子目录分层），可将 "." 作为一个 area
+若仓库根目录本身包含大量核心代码（无明显子目录分层），可将 "." 作为一个 group
 """
 ANALYZE_REPO_AREA_USER = """\
 
@@ -58,7 +58,7 @@ ANALYZE_REPO_AREA_USER = """\
 ## README 内容摘要
 {readme_content}
 
-请根据以上信息完成 area 划分，输出符合要求的 JSON。
+请根据以上信息完成 group 划分，输出符合要求的 JSON。
 """
 
 
@@ -120,14 +120,14 @@ ANALYZE_FILE_DESCRIPTION_SYSTEM = """\
 
 ANALYZE_FILE_DESCRIPTION_USER = """\
 文件：{file_name}（{language}）
-所在模块：{area_name}（路径：{area_path}）
+所在模块：{group_name}（路径：{group_path}）
 文件路径：{file_path}
-所在 Area 文件结构:{area_file_structure}
+所在 Group 文件结构:{group_file_structure}
 函数列表与描述：{func_descriptions}
 """
 
 # ==================================================================
-#  Step 8c: analyze_area_filelist_brief —— 文件 brief 批量生成
+#  Step 8c: analyze_group_filelist_brief —— 文件 brief 批量生成
 # ==================================================================
 
 ANALYZE_AREA_FILELIST_BRIEF_SYSTEM = """\
@@ -136,24 +136,24 @@ ANALYZE_AREA_FILELIST_BRIEF_SYSTEM = """\
 """
 
 ANALYZE_AREA_FILELIST_BRIEF_USER = """\
-模块：{area_name}，请为以下 {file_count} 个文件各生成一条 brief：
+模块：{group_name}，请为以下 {file_count} 个文件各生成一条 brief：
 
 {file_list_text}
 """
 
 # ==================================================================
-#  Step 8d: analyze_area_description —— 模块描述
+#  Step 8d: analyze_group_description —— 模块描述
 # ==================================================================
 
 ANALYZE_AREA_DESCRIPTION_SYSTEM = """\
-为给定的代码模块（area）生成简洁的自然语言描述（150-250字）。
+为给定的代码模块（group）生成简洁的自然语言描述（150-250字）。
 说明模块的核心功能、在仓库中的定位，以及包含了哪些主要能力。
 """
 
 ANALYZE_AREA_DESCRIPTION_USER = """\
-模块：{area_name}（路径：{area_path}）
+模块：{group_name}（路径：{group_path}）
 分层依据：{rationale}
-Area 文件结构：
+Group 文件结构：
 {file_structure}
 
 包含文件：
@@ -164,18 +164,18 @@ Area 文件结构：
 """
 
 # ==================================================================
-#  Step 8e: analyze_repo_arealist_brief —— 模块 brief 批量生成
+#  Step 8e: analyze_repo_grouplist_brief —— 模块 brief 批量生成
 # ==================================================================
 
 ANALYZE_REPO_AREALIST_BRIEF_SYSTEM = """\
 为每个模块生成一句话的 brief（不超过30字）。
-只输出 JSON，格式：{"briefs": [{"area_id": 1, "brief": "..."}, ...]}
+只输出 JSON，格式：{"briefs": [{"group_id": 1, "brief": "..."}, ...]}
 """
 
 ANALYZE_REPO_AREALIST_BRIEF_USER = """\
-仓库：{repo_name}，请为以下 {area_count} 个模块各生成一条 brief：
+仓库：{repo_name}，请为以下 {group_count} 个模块各生成一条 brief：
 
-{area_list_text}
+{group_list_text}
 """
 
 # ==================================================================
@@ -196,13 +196,13 @@ ANALYZE_REPO_DESCRIPTION_USER = """\
 ```
 
 模块划分：
-{area_structure}
+{group_structure}
 
 README 摘要：
 {readme_content}
 
 各模块描述：
-{area_descriptions}
+{group_descriptions}
 
 请生成该仓库的自然语言描述。
 """

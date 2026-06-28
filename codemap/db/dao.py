@@ -4,7 +4,7 @@ db/dao.py
 CodeMAP 数据访问层 —— 对 SQLite 的所有读写统一由此经过。
 
 设计原则：
-- 所有 JSON 字段（language/arealist/filelist/funclist/place/io/
+- 所有 JSON 字段（language/grouplist/filelist/funclist/place/interface/
   callgraph/precondition/postcondition/exception）在写入时自动
   序列化，读取时自动反序列化，上层代码始终面对 Python dict/list。
 - 每个表对应一个 *DB 类，方法命名统一：
@@ -28,8 +28,8 @@ _SCHEMA_PATH = os.path.join(os.path.dirname(__file__), 'schema.sql')
 
 # JSON 字段白名单，读取时自动反序列化
 _JSON_FIELDS = {
-    'language', 'arealist', 'filelist', 'funclist',
-    'place', 'io', 'callgraph', 'precondition', 'postcondition', 'exception',
+    'language', 'grouplist', 'filelist', 'funclist',
+    'place', 'interface', 'callgraph', 'precondition', 'postcondition', 'exception',
 }
 
 
@@ -123,7 +123,7 @@ def _build_update(fields: dict, allowed: set) -> tuple[str, list]:
 class RepoDB:
     """repo 表 CRUD"""
 
-    _UPDATABLE = {'name', 'path', 'language', 'description', 'arealist'}
+    _UPDATABLE = {'name', 'path', 'language', 'description', 'grouplist'}
 
     @staticmethod
     def create(name: str, path: str, db_path: Optional[str] = None) -> int:
@@ -173,17 +173,17 @@ class RepoDB:
 
     @staticmethod
     def delete(repo_id: int, db_path: Optional[str] = None) -> None:
-        """级联删除 repo 及其所有 area/file/func。"""
+        """级联删除 repo 及其所有 group/file/func。"""
         with get_connection(db_path) as conn:
             conn.execute("DELETE FROM repo WHERE id = ?", (repo_id,))
 
 
 # ==================================================================
-#  AreaDB —— area 表
+#  GroupDB —— group 表
 # ==================================================================
 
-class AreaDB:
-    """area 表 CRUD"""
+class GroupDB:
+    """group 表 CRUD"""
 
     _UPDATABLE = {'name', 'path', 'rationale', 'description', 'filelist'}
 
@@ -193,16 +193,16 @@ class AreaDB:
                db_path: Optional[str] = None) -> int:
         with get_connection(db_path) as conn:
             cur = conn.execute(
-                "INSERT INTO area (repo_id, name, path, rationale) VALUES (?, ?, ?, ?)",
+                "INSERT INTO group (repo_id, name, path, rationale) VALUES (?, ?, ?, ?)",
                 (repo_id, name, path, rationale),
             )
             return cur.lastrowid
 
     @staticmethod
-    def get_by_id(area_id: int, db_path: Optional[str] = None) -> Optional[dict]:
+    def get_by_id(group_id: int, db_path: Optional[str] = None) -> Optional[dict]:
         with get_connection(db_path) as conn:
             row = conn.execute(
-                "SELECT * FROM area WHERE id = ?", (area_id,)
+                "SELECT * FROM group WHERE id = ?", (group_id,)
             ).fetchone()
             return _row_to_dict(row)
 
@@ -211,7 +211,7 @@ class AreaDB:
                     db_path: Optional[str] = None) -> Optional[dict]:
         with get_connection(db_path) as conn:
             row = conn.execute(
-                "SELECT * FROM area WHERE repo_id = ? AND path = ?",
+                "SELECT * FROM group WHERE repo_id = ? AND path = ?",
                 (repo_id, path),
             ).fetchone()
             return _row_to_dict(row)
@@ -220,22 +220,22 @@ class AreaDB:
     def list_by_repo(repo_id: int, db_path: Optional[str] = None) -> list[dict]:
         with get_connection(db_path) as conn:
             rows = conn.execute(
-                "SELECT * FROM area WHERE repo_id = ? ORDER BY path",
+                "SELECT * FROM group WHERE repo_id = ? ORDER BY path",
                 (repo_id,),
             ).fetchall()
             return _rows_to_list(rows)
 
     @staticmethod
-    def update(area_id: int, db_path: Optional[str] = None, **fields) -> None:
-        set_clause, values = _build_update(fields, AreaDB._UPDATABLE)
-        values.append(area_id)
+    def update(group_id: int, db_path: Optional[str] = None, **fields) -> None:
+        set_clause, values = _build_update(fields, GroupDB._UPDATABLE)
+        values.append(group_id)
         with get_connection(db_path) as conn:
-            conn.execute(f"UPDATE area SET {set_clause} WHERE id = ?", values)
+            conn.execute(f"UPDATE group SET {set_clause} WHERE id = ?", values)
 
     @staticmethod
-    def delete(area_id: int, db_path: Optional[str] = None) -> None:
+    def delete(group_id: int, db_path: Optional[str] = None) -> None:
         with get_connection(db_path) as conn:
-            conn.execute("DELETE FROM area WHERE id = ?", (area_id,))
+            conn.execute("DELETE FROM group WHERE id = ?", (group_id,))
 
 
 # ==================================================================
@@ -248,12 +248,12 @@ class FileDB:
     _UPDATABLE = {'name', 'path', 'language', 'description', 'funclist'}
 
     @staticmethod
-    def create(repo_id: int, area_id: int, name: str, path: str,
+    def create(repo_id: int, group_id: int, name: str, path: str,
                db_path: Optional[str] = None) -> int:
         with get_connection(db_path) as conn:
             cur = conn.execute(
-                "INSERT INTO file (repo_id, area_id, name, path) VALUES (?, ?, ?, ?)",
-                (repo_id, area_id, name, path),
+                "INSERT INTO file (repo_id, group_id, name, path) VALUES (?, ?, ?, ?)",
+                (repo_id, group_id, name, path),
             )
             return cur.lastrowid
 
@@ -276,11 +276,11 @@ class FileDB:
             return _row_to_dict(row)
 
     @staticmethod
-    def list_by_area(area_id: int, db_path: Optional[str] = None) -> list[dict]:
+    def list_by_group(group_id: int, db_path: Optional[str] = None) -> list[dict]:
         with get_connection(db_path) as conn:
             rows = conn.execute(
-                "SELECT * FROM file WHERE area_id = ? ORDER BY path",
-                (area_id,),
+                "SELECT * FROM file WHERE group_id = ? ORDER BY path",
+                (group_id,),
             ).fetchall()
             return _rows_to_list(rows)
 
@@ -314,29 +314,29 @@ class FuncDB:
     """func 表 CRUD"""
 
     _UPDATABLE = {
-        'name', 'signature', 'place', 'io',
+        'name', 'signature', 'place', 'interface',
         'callgraph', 'precondition', 'postcondition', 'exception', 'description',
     }
 
     @staticmethod
-    def create(repo_id: int, area_id: int, file_id: int,
+    def create(repo_id: int, group_id: int, file_id: int,
                name: str,
                signature: Optional[str] = None,
                place: Optional[dict] = None,
-               io: Optional[dict] = None,
+               interface: Optional[dict] = None,
                db_path: Optional[str] = None) -> int:
         """
         新建 func 记录。
         place 示例：{"file_path": "src/deflate.c", "start_line": 42, "end_line": 105}
-        io    示例：{"params": [...], "returns": {...}}
+        interface    示例：{"params": [...], "returns": {...}}
         """
         with get_connection(db_path) as conn:
             cur = conn.execute(
                 """INSERT INTO func
-                   (repo_id, area_id, file_id, name, signature, place, io)
+                   (repo_id, group_id, file_id, name, signature, place, interface)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (repo_id, area_id, file_id, name,
-                 signature, _dump(place), _dump(io)),
+                (repo_id, group_id, file_id, name,
+                 signature, _dump(place), _dump(interface)),
             )
             return cur.lastrowid
 

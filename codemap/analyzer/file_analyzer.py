@@ -470,7 +470,7 @@ def _extract_c_cpp_funcs(source: str, rel_path: str, lang: str = 'C') -> list[di
         src_bytes = source.encode('utf-8', errors='replace')
         tree      = parser.parse(src_bytes)
     except Exception:
-        print(f"[warn] tree-sitter 解析器加载失败（{ts_name}）：{e}")
+        print(f"[warn] tree-sitter 解析器加载失败（{ts_name}）")
         return []
 
     func_nodes = _find_all_nodes(tree.root_node, {'function_definition'})
@@ -800,7 +800,7 @@ def analyze_file_language(
     检测仓库内所有文件的编程语言，并写入 file.language 字段。
 
     幂等：对已写入 language 的文件也会覆盖更新（保证重跑一致性）。
-    依赖：file 表中已有记录（请先执行 analyze_area_file）。
+    依赖：file 表中已有记录（请先执行 analyze_group_file）。
 
     Parameters
     ----------
@@ -831,7 +831,7 @@ def analyze_file_language(
 
     all_files = FileDB.list_by_repo(repo_id, db_path=_db)
     if not all_files:
-        print("[analyze_file_language] ⚠ 无 file 记录，请先执行 analyze_area_file。")
+        print("[analyze_file_language] ⚠ 无 file 记录，请先执行 analyze_group_file。")
         return {}
 
     result: dict[int, str] = {}
@@ -881,7 +881,7 @@ def analyze_file_func(
       无解         → 跳过
 
     依赖：
-      - file 表已有记录（analyze_area_file 完成）
+      - file 表已有记录（analyze_group_file 完成）
       - file.language 已填充（analyze_file_language 完成，否则降级用扩展名检测）
 
     Parameters
@@ -944,7 +944,7 @@ def analyze_file_func(
     # ── 取 file 列表 ─────────────────────────────────────────────
     all_files = FileDB.list_by_repo(repo_id, db_path=_db)
     if not all_files:
-        print("[analyze_file_func] ⚠ 无 file 记录，请先执行 analyze_area_file。")
+        print("[analyze_file_func] ⚠ 无 file 记录，请先执行 analyze_group_file。")
         return {}
 
     # 按语言过滤（可选）
@@ -961,7 +961,7 @@ def analyze_file_func(
 
     for file_rec in all_files:
         file_id  = file_rec['id']
-        area_id  = file_rec['area_id']
+        group_id  = file_rec['group_id']
         filename = file_rec['name']
         rel_path = file_rec['path']
         abs_path = os.path.join(repo_path, rel_path)
@@ -1017,7 +1017,7 @@ def analyze_file_func(
             try:
                 func_id = FuncDB.create(
                     repo_id   = repo_id,
-                    area_id   = area_id,
+                    group_id   = group_id,
                     file_id   = file_id,
                     name      = func_name,
                     signature = signature,
@@ -1247,7 +1247,7 @@ def analyze_file_description(
     """
     为仓库内每个文件生成自然语言描述，写入 file.description。
 
-    信息来源：文件在 area 中的位置结构 + 函数列表及其 description。
+    信息来源：文件在 group 中的位置结构 + 函数列表及其 description。
     依赖：func.description 已完成（Step 12）。
 
     Parameters
@@ -1272,15 +1272,15 @@ def analyze_file_description(
     if repo is None:
         raise ValueError(f"[analyze_file_description] repo_id={repo_id} 不存在。")
 
-    from db.dao import AreaDB
-    areas     = AreaDB.list_by_repo(repo_id, db_path=_db)
-    area_map  = {a["id"]: a for a in areas}
+    from db.dao import GroupDB
+    groups     = GroupDB.list_by_repo(repo_id, db_path=_db)
+    group_map  = {a["id"]: a for a in groups}
 
     all_files = FileDB.list_by_repo(repo_id, db_path=_db)
-    # 按 area 分组，用于构造文件结构上下文
-    files_by_area: dict[int, list[dict]] = {}
+    # 按 group 分组，用于构造文件结构上下文
+    files_by_group: dict[int, list[dict]] = {}
     for f in all_files:
-        files_by_area.setdefault(f["area_id"], []).append(f)
+        files_by_group.setdefault(f["group_id"], []).append(f)
 
     print(
         f"[analyze_file_description] 目标仓库：{repo['name']}，"
@@ -1293,20 +1293,20 @@ def analyze_file_description(
     for file_rec in all_files:
         file_id   = file_rec["id"]
         file_name = file_rec["name"]
-        area_id   = file_rec.get("area_id")
+        group_id   = file_rec.get("group_id")
 
         if skip_if_exists and file_rec.get("description"):
             result[file_id] = file_rec["description"]
             skipped += 1
             continue
 
-        area_rec  = area_map.get(area_id, {})
-        area_name = area_rec.get("name", "")
-        area_path = area_rec.get("path", "")
+        group_rec  = group_map.get(group_id, {})
+        group_name = group_rec.get("name", "")
+        group_path = group_rec.get("path", "")
 
-        # 同 area 文件结构
-        sibling_files = files_by_area.get(area_id, [])
-        area_file_structure = "\n".join(
+        # 同 group 文件结构
+        sibling_files = files_by_group.get(group_id, [])
+        group_file_structure = "\n".join(
             f"  {'→ ' if f['id'] == file_id else '  '}{f['name']}  ({f.get('language','')})"
             for f in sibling_files
         )
@@ -1338,10 +1338,10 @@ def analyze_file_description(
         user_content = ANALYZE_FILE_DESCRIPTION_USER.format(
             file_name          = file_name,
             language           = file_rec.get("language", "Unknown"),
-            area_name          = area_name,
-            area_path          = area_path,
+            group_name          = group_name,
+            group_path          = group_path,
             file_path          = file_rec.get("path", ""),
-            area_file_structure= area_file_structure,
+            group_file_structure= group_file_structure,
             func_descriptions  = func_descriptions,
         )
         messages = [
